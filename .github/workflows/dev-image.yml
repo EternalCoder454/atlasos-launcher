@@ -1,0 +1,143 @@
+name: Dev image
+
+# The image CI runs in, built from ci/Containerfile and published as
+# ghcr.io/eternalcoder454/atlas-launcher-dev:44 (public). Its label
+# net.eterneon.atlas.launcher.image-tag holds ci/image-tag.sh: a hash of the
+# Containerfile, the spec's BuildRequires and the atlas-framework tag. The image
+# is out of date when that differs from this checkout's.
+#
+# Only the `publish` job pushes (the only one with `packages: write`), and only
+# on main. Every other ref gets `verify`: the same build, kept local, to prove
+# the Containerfile still builds.
+#
+#   push to main    when the Containerfile, the spec or Cargo.toml changed
+#   dispatch        on main: `force` rebuilds a current image too (newer Fedora packages)
+#   workflow_call   ci.yml calls it first: on main it publishes a missing or
+#                   stale image (the first run ever bootstraps it); on a pull
+#                   request or branch the jobs after it use the published image.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ci/**
+      - .containerignore
+      - packaging/atlas-launcher.spec
+      - Cargo.toml
+      - .github/workflows/dev-image.yml
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the published image is current
+        type: boolean
+        default: false
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Never cancel a build half way: a second one for the same ref waits.
+concurrency:
+  group: dev-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/eternalcoder454/atlas-launcher-dev
+  LABEL: net.eterneon.atlas.launcher.image-tag
+
+jobs:
+  check:
+    name: Is the image current?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      current: ${{ steps.cmp.outputs.current }}
+      want: ${{ steps.cmp.outputs.want }}
+      framework: ${{ steps.cmp.outputs.framework }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR (read)
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: skopeo login ghcr.io --username "$ACTOR" --password-stdin <<<"$TOKEN"
+      - name: Compare the published label with this checkout
+        id: cmp
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          want=$(ci/image-tag.sh)
+          echo "want=$want" >> "$GITHUB_OUTPUT"
+          echo "framework=$(ci/framework-ref.sh)" >> "$GITHUB_OUTPUT"
+          have=$(skopeo inspect --retry-times 3 --format "{{ index .Labels \"$LABEL\" }}" "docker://$IMAGE:44" 2>/dev/null || true)
+          echo "published: '${have:-none}', wanted: '$want'"
+          if [ "$have" = "$want" ] && [ "$FORCE" != true ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # main only: build, push.
+  publish:
+    name: Publish the image
+    needs: check
+    if: needs.check.outputs.current != 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        env:
+          WANT: ${{ needs.check.outputs.want }}
+          FRAMEWORK: ${{ needs.check.outputs.framework }}
+        run: |
+          podman build -f ci/Containerfile --target ci \
+            --build-arg "ATLAS_FRAMEWORK_REF=$FRAMEWORK" \
+            --build-arg "IMAGE_TAG=$WANT" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$IMAGE:44" .
+      # The repo is public, so a pushed image is public at once: nothing
+      # secret may be in its files, history or environment.
+      - name: Secret check
+        run: ci/secret-check.sh "$IMAGE:44"
+      - name: Log in to GHCR (write)
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: podman login ghcr.io --username "$ACTOR" --password-stdin <<<"$TOKEN"
+      - name: Push the image
+        run: podman push "$IMAGE:44"
+
+  # Any other ref: build without pushing.
+  verify:
+    name: Build the image (no push)
+    needs: check
+    if: needs.check.outputs.current != 'true' && !(github.ref == 'refs/heads/main' && github.event_name != 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        env:
+          WANT: ${{ needs.check.outputs.want }}
+          FRAMEWORK: ${{ needs.check.outputs.framework }}
+        run: |
+          podman build -f ci/Containerfile --target ci \
+            --build-arg "ATLAS_FRAMEWORK_REF=$FRAMEWORK" \
+            --build-arg "IMAGE_TAG=$WANT" \
+            -t "$IMAGE:44" .
+          echo "::warning title=Dev image out of date::The published $IMAGE:44 does not match this change (ci/Containerfile, the spec's BuildRequires or the framework tag). It built here, but the jobs after it still run in the published one until the change reaches main."

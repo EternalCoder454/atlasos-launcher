@@ -1,0 +1,4 @@
+# The image build reads only the spec; nothing else of the repo goes into the
+# build context (no .git, no target/, no local files).
+*
+!packaging/atlas-launcher.spec

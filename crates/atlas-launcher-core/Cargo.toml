@@ -1,0 +1,11 @@
+[package]
+name = "atlas-launcher-core"
+description = "AtlasOS Launcher's search, ranking and parsers (no Qt)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+log.workspace = true
