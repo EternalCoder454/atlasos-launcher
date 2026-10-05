@@ -22,7 +22,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -47,9 +47,11 @@ const MAX_LATE_ITEMS: usize = 256;
 /// Most history operations kept while `usage.tsv` is still loading.
 const MAX_PENDING_OPS: usize = 64;
 /// Longest wait at shutdown for the history to finish loading.
-const LOAD_WAIT: Duration = Duration::from_secs(2);
+const LOAD_WAIT: Duration = Duration::from_secs(1);
 /// Longest `shutdown` waits for the workers in all; a worker stuck in a slow
 /// file system call is left to finish on its own.
+/// What the IO worker is always given at shutdown, for the final write.
+const IO_FLOOR: Duration = Duration::from_millis(500);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 /// Most entries taken from an import list.
 const MAX_IMPORT_LIST: usize = 1024;
@@ -151,10 +153,19 @@ struct Counters {
 struct Emitter {
     cb: Arc<dyn Fn(Update) + Send + Sync>,
     counters: Arc<Counters>,
+    /// Set by `shutdown`: a worker left running never calls back after it.
+    closed: Arc<AtomicBool>,
 }
 
 impl Emitter {
     fn send(&self, u: Update) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        self.deliver(u);
+    }
+
+    fn deliver(&self, u: Update) {
         if catch_unwind(AssertUnwindSafe(|| (self.cb)(u))).is_err() {
             log::error!("the update callback panicked");
         }
@@ -168,7 +179,7 @@ impl Emitter {
         let me = self.clone();
         if thread::Builder::new()
             .name("launcher-report".into())
-            .spawn(move || me.send(Update::Problem(kind)))
+            .spawn(move || me.deliver(Update::Problem(kind)))
             .is_err()
         {
             log::error!("the problem could not be reported");
@@ -176,6 +187,9 @@ impl Emitter {
     }
 
     fn problem(&self, kind: ProblemKind) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
         self.counters.problems.fetch_add(1, Ordering::Relaxed);
         log::warn!("problem: {kind:?}");
         self.send(Update::Problem(kind));
@@ -204,11 +218,14 @@ enum SearchMsg {
     UsageLoaded(UsageStore),
     /// `usage.tsv` could not be written: send the history again later.
     UsageWriteFailed,
-    RecentLoaded(Arc<RecentFiles>),
+    /// The second field: report the Start page (false when `Opened` follows).
+    RecentLoaded(Arc<RecentFiles>, bool),
     SettingsLoaded(Option<Arc<SettingsIndex>>),
     PathLoaded(Arc<PathCache>),
     /// The panel opened: report the Start page again.
     Opened,
+    /// The panel opened: only retry a failed save.
+    Retry,
     #[cfg(test)]
     TestPanic,
     Shutdown,
@@ -259,6 +276,7 @@ pub struct Engine {
     io: Option<JoinHandle<()>>,
     scan: Option<JoinHandle<()>>,
     counters: Arc<Counters>,
+    closed: Arc<AtomicBool>,
 }
 
 impl Engine {
@@ -288,6 +306,7 @@ impl Engine {
         let out = Emitter {
             cb: Arc::from(on_update),
             counters: Arc::clone(&counters),
+            closed: Arc::new(AtomicBool::new(false)),
         };
         let (search_tx, search_rx) = mpsc::channel();
         let (io_tx, io_rx) = mpsc::channel();
@@ -326,6 +345,7 @@ impl Engine {
             io,
             scan,
             counters,
+            closed: Arc::clone(&out.closed),
         };
         if e.search.is_none() || e.io.is_none() || e.scan.is_none() {
             e.shutdown();
@@ -420,7 +440,7 @@ impl Engine {
     /// the recent files exist), retry a failed save of the history, then
     /// report the Start page.
     pub fn refresh(&self) {
-        self.to_search(SearchMsg::Opened);
+        self.to_search(SearchMsg::Retry);
         if self.scan_tx.send(ScanMsg::Refresh).is_err() {
             log::debug!("scan worker is gone; message dropped");
         }
@@ -446,13 +466,16 @@ impl Engine {
     /// requested are finished first, by the workers that are not stuck. Safe
     /// to call twice; later calls do nothing.
     pub fn shutdown(&mut self) {
+        // No callback after this point, from any worker.
+        self.closed.store(true, Ordering::SeqCst);
         let end = Instant::now() + SHUTDOWN_WAIT;
         // Search first: it may still queue a write for the IO worker.
         let _ = self.search_tx.send(SearchMsg::Shutdown);
         join_until(self.search.take(), end);
         let _ = self.io_tx.send(IoMsg::Shutdown);
         let _ = self.scan_tx.send(ScanMsg::Shutdown);
-        join_until(self.io.take(), end);
+        // The last usage write gets time even if the search worker used it up.
+        join_until(self.io.take(), end.max(Instant::now() + IO_FLOOR));
         join_until(self.scan.take(), end);
     }
 }
@@ -577,7 +600,9 @@ impl Search {
         self.finish_pending(&rx);
         // Failures reported while stopping still count: try the write again.
         while let Ok(m) = rx.try_recv() {
-            if matches!(m, SearchMsg::UsageWriteFailed) {
+            if matches!(m, SearchMsg::UsageWriteFailed)
+                && (!self.usage.is_empty() || self.usage.is_dirty())
+            {
                 self.unsaved = true;
             }
         }
@@ -642,13 +667,23 @@ impl Search {
             SearchMsg::Record { query, id } => self.record(&query, &id),
             SearchMsg::ClearHistory => self.clear_history(),
             SearchMsg::UsageLoaded(store) => self.usage_loaded(store),
-            SearchMsg::RecentLoaded(r) => {
+            SearchMsg::RecentLoaded(r, emit) => {
                 self.sources.recent = r;
-                self.recent_dirty = true;
+                self.recent_dirty |= emit;
             }
             SearchMsg::SettingsLoaded(s) => self.sources.settings = s,
             SearchMsg::PathLoaded(p) => self.sources.path = p,
-            SearchMsg::UsageWriteFailed => self.unsaved = true,
+            SearchMsg::UsageWriteFailed => {
+                // Not after a clear: an empty, clean store has nothing to send.
+                if !self.usage.is_empty() || self.usage.is_dirty() {
+                    self.unsaved = true;
+                }
+            }
+            SearchMsg::Retry => {
+                if self.usage_loaded {
+                    self.flush_usage();
+                }
+            }
             SearchMsg::Opened => {
                 self.recent_dirty = true;
                 // Retry a write that failed.
@@ -865,6 +900,18 @@ impl Io {
             }
             self.guarded(|io| io.handle(m));
         }
+        // A search worker that was left running may have queued a last write
+        // behind Shutdown; do it, and say what is dropped.
+        let mut dropped = 0;
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                IoMsg::WriteUsage(_) => self.guarded(|io| io.handle(m)),
+                _ => dropped += 1,
+            }
+        }
+        if dropped > 0 {
+            log::warn!("{dropped} io messages dropped at shutdown");
+        }
         log::debug!("io worker stopped");
     }
 
@@ -1052,6 +1099,8 @@ struct Scan {
     settings_stamp: Stamp,
     recent: Arc<RecentFiles>,
     path: Arc<PathCache>,
+    /// The first load is done; later ones are followed by `Opened`.
+    started: bool,
     #[cfg(test)]
     gate: Option<Receiver<()>>,
 }
@@ -1071,6 +1120,7 @@ impl Scan {
             settings_stamp: None,
             recent: Arc::new(RecentFiles::default()),
             path: Arc::new(PathCache::default()),
+            started: false,
             #[cfg(test)]
             gate: hooks.scan_gate.take(),
         }
@@ -1091,11 +1141,17 @@ impl Scan {
         self.guarded(Scan::reload_settings);
         self.guarded(Scan::rescan_path);
         // Blocks; no timers. Ends on Shutdown or when every sender is gone.
-        while let Ok(m) = rx.recv() {
-            match m {
-                ScanMsg::Shutdown => break,
-                ScanMsg::Refresh => self.refresh(),
+        self.started = true;
+        'run: while let Ok(m) = rx.recv() {
+            let mut next = Some(m);
+            // Opens that queued up while a refresh ran count as one.
+            while let Some(m) = next {
+                if matches!(m, ScanMsg::Shutdown) {
+                    break 'run;
+                }
+                next = rx.try_recv().ok();
             }
+            self.refresh();
         }
         log::debug!("scan worker stopped");
     }
@@ -1134,7 +1190,10 @@ impl Scan {
         };
         log::debug!("recent files: {}", recent.items.len());
         self.recent = Arc::new(recent);
-        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent)));
+        self.to_search(SearchMsg::RecentLoaded(
+            Arc::clone(&self.recent),
+            !self.started,
+        ));
     }
 
     /// The list is unchanged, but files may have been deleted since: filter
@@ -1142,8 +1201,11 @@ impl Scan {
     fn recheck_recent(&mut self) {
         let mut r = (*self.recent).clone();
         r.retain_existing();
+        if r.items == self.recent.items {
+            return;
+        }
         self.recent = Arc::new(r);
-        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent)));
+        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent), false));
     }
 
     fn reload_settings(&mut self) {
@@ -1198,6 +1260,8 @@ impl Scan {
         if self.path.is_stale() {
             self.guarded(Scan::rescan_path);
         }
+        // Everything is in place: report the Start page once.
+        self.to_search(SearchMsg::Opened);
     }
 }
 #[cfg(test)]
@@ -1660,10 +1724,9 @@ mod tests {
         stop_after(e, || {
             let _ = gate_tx.send(());
         });
-        assert!(
-            rx.try_iter()
-                .any(|u| matches!(u, Update::Problem(ProblemKind::UsageUnreadable)))
-        );
+        // (No Problem arrives: the load ran during shutdown, after which
+        // nothing calls back.)
+        assert!(rx.try_iter().all(|u| !matches!(u, Update::Results { .. })));
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("alpha-viewer"));
     }

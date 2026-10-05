@@ -385,7 +385,9 @@ The GUI thread never blocks:
   panel opens (only what changed; the recent files are checked for existence
   every time).
 - Shutdown waits at most 2 s for the workers; one stuck in a slow file system
-  call is left to finish on its own.
+  call is left to finish on its own: it may complete its system call, but
+  never calls back after shutdown (the bridge's callback queues through
+  `CxxQtThread`, which also refuses once the QObject is gone).
 - The app catalogue comes from KService/KSycoca on the GUI thread (an mmap'd
   database read in a few ms). It is rebuilt when `KSycoca::databaseChanged`
   fires, and handed to the worker as one immutable snapshot.
