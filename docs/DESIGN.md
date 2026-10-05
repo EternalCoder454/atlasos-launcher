@@ -377,11 +377,15 @@ The GUI thread never blocks:
   with a timeout).
 - **Search worker** (one Rust thread): queries, merging, scoring, the
   usage store.
-- **IO worker:**
-  - `recently-used.xbel`;
-  - the `PATH` scan;
-  - the Settings index;
-  - writes of `pinned.list`.
+- **IO worker:** reads `usage.tsv` and `pinned.list` at start, and does
+  every write (`usage.tsv`, `pinned.list`), so a write never waits behind a
+  slow read.
+- **Scan worker:** the slow reads, `recently-used.xbel` (with a `stat` per
+  entry), the `PATH` scan and the Settings index. They are repeated when the
+  panel opens (only what changed; the recent files are checked for existence
+  every time).
+- Shutdown waits at most 2 s for the workers; one stuck in a slow file system
+  call is left to finish on its own.
 - The app catalogue comes from KService/KSycoca on the GUI thread (an mmap'd
   database read in a few ms). It is rebuilt when `KSycoca::databaseChanged`
   fires, and handed to the worker as one immutable snapshot.
@@ -516,8 +520,9 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 | Explorer's index is missing, slow or erroring | Recent files only; the file row group says "File search is unavailable" once per session |
 | Settings index missing or invalid | No Settings results; one warning in the log |
 | `usage.tsv`, `pinned.list` or `launcher.conf` corrupt | Bad lines skipped; the file is rewritten on the next change |
-| Disk full or file unwritable | Changes kept in memory, one warning; nothing is lost from the old file (atomic writes) |
-| A recent file is on a hung network mount | Only the IO worker waits on its `stat` (the GUI and search never do); recent files show the last list until it returns. Pin writes queued behind it are delayed, not lost |
+| Disk full or file unwritable | Changes kept in memory, one warning; nothing is lost from the old file (atomic writes). The history is written again on the next use, when the panel opens and at shutdown |
+| A worker thread cannot start | The engine does nothing; one `ThreadStart` problem is reported and logged |
+| A recent file is on a hung network mount | Only the scan worker waits on its `stat` (the GUI, search and writes never do); recent files show the last list until it returns. At logout, shutdown stops waiting after 2 s |
 | A pinned app is uninstalled | Hidden, but kept in `pinned.list`, so a reinstall brings it back |
 | A launch fails | A notification with the job's error |
 | A power or session call fails | An inline message in the panel's footer |

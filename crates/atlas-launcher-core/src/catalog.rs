@@ -137,6 +137,7 @@ struct Prep {
     actions: Vec<Prepared>,
 }
 
+#[derive(Default)]
 pub struct Catalog {
     /// In A–Z order: non-letters ("#") first, then by folded name, then id.
     apps: Vec<AppEntry>,
@@ -151,7 +152,7 @@ pub struct Catalog {
 /// The A–Z group of a name: its first letter in upper case when that is a
 /// Latin letter (after folding, so "É" is E and "ß" is S), `#` for anything
 /// else: digits, symbols and other scripts.
-fn letter_of(name: &str) -> char {
+pub fn letter_of(name: &str) -> char {
     match fold(name).chars().next() {
         Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase(),
         Some('ß') => 'S',
@@ -162,6 +163,28 @@ fn letter_of(name: &str) -> char {
         Some('ħ') => 'H',
         Some('ı') => 'I',
         _ => '#',
+    }
+}
+
+/// An app's row: `app:<desktop id>`, its name, and its generic name (or
+/// comment) below. Used for search hits, pins, A–Z and recent apps alike.
+pub fn app_item(app: &AppEntry, score: f32) -> ResultItem {
+    let subtitle = if app.generic_name.is_empty() {
+        &app.comment
+    } else {
+        &app.generic_name
+    };
+    ResultItem {
+        id: format!("app:{}", app.desktop_id),
+        kind: Kind::App,
+        title: app.name.clone(),
+        subtitle: subtitle.clone(),
+        icon: app.icon.clone(),
+        score,
+        action: Action::LaunchApp {
+            desktop_id: app.desktop_id.clone(),
+            action: None,
+        },
     }
 }
 
@@ -292,23 +315,7 @@ impl Catalog {
         for (app, p) in self.apps.iter().zip(&self.prep) {
             let desc = (!app.comment.is_empty()).then_some(&p.comment);
             if let Some(m) = score_fields(q, &p.name, &p.secondary, desc) {
-                let subtitle = if app.generic_name.is_empty() {
-                    &app.comment
-                } else {
-                    &app.generic_name
-                };
-                out.push(ResultItem {
-                    id: format!("app:{}", app.desktop_id),
-                    kind: Kind::App,
-                    title: app.name.clone(),
-                    subtitle: subtitle.clone(),
-                    icon: app.icon.clone(),
-                    score: m * app_prior,
-                    action: Action::LaunchApp {
-                        desktop_id: app.desktop_id.clone(),
-                        action: None,
-                    },
-                });
+                out.push(app_item(app, m * app_prior));
             }
             let Some((first, rest)) = &action_query else {
                 continue;

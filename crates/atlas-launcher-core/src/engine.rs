@@ -27,13 +27,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::catalog::{AppEntry, Catalog};
+use crate::catalog::{self, AppEntry, Catalog};
 use crate::commands::{PathCache, SessionAvailability, SessionCommands};
 use crate::fsutil::{read_capped, sweep_stale_temps, write_atomic};
 use crate::pins::{self, Pins};
 use crate::query::{self, Context, ResultSet, SearchOptions, Source, Sources};
 use crate::recent::{RecentError, RecentFiles};
-use crate::result::{Action, Kind, ResultItem, prior};
+use crate::result::{Kind, ResultItem, prior};
 use crate::settings_index::{IndexError, SettingsIndex};
 use crate::text::Query;
 use crate::usage::{self, UsageStore, learnable};
@@ -47,7 +47,10 @@ const MAX_LATE_ITEMS: usize = 256;
 /// Most history operations kept while `usage.tsv` is still loading.
 const MAX_PENDING_OPS: usize = 64;
 /// Longest wait at shutdown for the history to finish loading.
-const LOAD_WAIT: Duration = Duration::from_secs(5);
+const LOAD_WAIT: Duration = Duration::from_secs(2);
+/// Longest `shutdown` waits for the workers in all; a worker stuck in a slow
+/// file system call is left to finish on its own.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 /// Most entries taken from an import list.
 const MAX_IMPORT_LIST: usize = 1024;
 
@@ -157,6 +160,21 @@ impl Emitter {
         }
     }
 
+    /// Reports a problem from a one-off thread, for when the caller is still
+    /// inside `Engine::start`.
+    fn problem_deferred(&self, kind: ProblemKind) {
+        self.counters.problems.fetch_add(1, Ordering::Relaxed);
+        log::warn!("problem: {kind:?}");
+        let me = self.clone();
+        if thread::Builder::new()
+            .name("launcher-report".into())
+            .spawn(move || me.send(Update::Problem(kind)))
+            .is_err()
+        {
+            log::error!("the problem could not be reported");
+        }
+    }
+
     fn problem(&self, kind: ProblemKind) {
         self.counters.problems.fetch_add(1, Ordering::Relaxed);
         log::warn!("problem: {kind:?}");
@@ -182,8 +200,10 @@ enum SearchMsg {
         id: String,
     },
     ClearHistory,
-    // From the IO worker.
+    // From the IO and scan workers.
     UsageLoaded(UsageStore),
+    /// `usage.tsv` could not be written: send the history again later.
+    UsageWriteFailed,
     RecentLoaded(Arc<RecentFiles>),
     SettingsLoaded(Option<Arc<SettingsIndex>>),
     PathLoaded(Arc<PathCache>),
@@ -195,7 +215,6 @@ enum SearchMsg {
 }
 
 enum IoMsg {
-    Refresh,
     Pin(String),
     Unpin(String),
     MovePin(String, usize),
@@ -205,21 +224,65 @@ enum IoMsg {
     Shutdown,
 }
 
+enum ScanMsg {
+    /// The panel opened.
+    Refresh,
+    Shutdown,
+}
+
+/// Switches for tests to hold or break a worker at a chosen point.
+#[derive(Default)]
+struct Hooks {
+    /// The IO worker waits for this before reading `usage.tsv`.
+    #[cfg(test)]
+    load_gate: Option<Receiver<()>>,
+    /// The scan worker waits for this before its first stage.
+    #[cfg(test)]
+    scan_gate: Option<Receiver<()>>,
+    /// While set, every `usage.tsv` write fails.
+    #[cfg(test)]
+    write_fail: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Reading `usage.tsv` panics.
+    #[cfg(test)]
+    panic_usage: bool,
+    /// The scan thread "fails to start".
+    #[cfg(test)]
+    fail_scan_spawn: bool,
+}
+
 /// The engine's handle. Methods never block: each sends one message.
 pub struct Engine {
     search_tx: Sender<SearchMsg>,
     io_tx: Sender<IoMsg>,
+    scan_tx: Sender<ScanMsg>,
     search: Option<JoinHandle<()>>,
     io: Option<JoinHandle<()>>,
+    scan: Option<JoinHandle<()>>,
     counters: Arc<Counters>,
 }
 
 impl Engine {
-    /// Starts the two worker threads. `on_update` is called from them.
+    /// Starts the worker threads: search, IO (reads and writes of the user's
+    /// files) and scan (the slow reads: recent files, Settings index, `PATH`),
+    /// so a slow read never delays a write. `on_update` is called from them.
+    ///
+    /// All start or none do. If a thread cannot be started the engine is
+    /// inert ([`Engine::is_running`] is false, every method does nothing) and
+    /// `Update::Problem(ThreadStart)` follows from a short-lived thread, never
+    /// from inside this call.
     pub fn start(
         cfg: EngineConfig,
         opts: SearchOptions,
         on_update: Box<dyn Fn(Update) + Send + Sync>,
+    ) -> Engine {
+        Self::start_with(cfg, opts, on_update, Hooks::default())
+    }
+
+    fn start_with(
+        cfg: EngineConfig,
+        opts: SearchOptions,
+        on_update: Box<dyn Fn(Update) + Send + Sync>,
+        mut hooks: Hooks,
     ) -> Engine {
         let counters = Arc::new(Counters::default());
         let out = Emitter {
@@ -228,29 +291,52 @@ impl Engine {
         };
         let (search_tx, search_rx) = mpsc::channel();
         let (io_tx, io_rx) = mpsc::channel();
+        let (scan_tx, scan_rx) = mpsc::channel();
 
+        let spawn = |name: &str, f: Box<dyn FnOnce() + Send>| {
+            thread::Builder::new()
+                .name(name.into())
+                .spawn(f)
+                .map_err(|e| log::error!("{name} thread did not start: {:?}", e.kind()))
+                .ok()
+        };
         let search_worker = Search::new(&cfg, opts, out.clone(), io_tx.clone());
-        let search = thread::Builder::new()
-            .name("launcher-search".into())
-            .spawn(move || search_worker.run(search_rx))
-            .map_err(|e| log::error!("search thread did not start: {:?}", e.kind()))
-            .ok();
-        let io_worker = Io::new(cfg, out.clone(), search_tx.clone());
-        let io = thread::Builder::new()
-            .name("launcher-io".into())
-            .spawn(move || io_worker.run(io_rx))
-            .map_err(|e| log::error!("io thread did not start: {:?}", e.kind()))
-            .ok();
-        if search.is_none() || io.is_none() {
-            out.problem(ProblemKind::ThreadStart);
-        }
-        Engine {
+        let search = spawn(
+            "launcher-search",
+            Box::new(move || search_worker.run(search_rx)),
+        );
+        let io_worker = Io::new(&cfg, out.clone(), search_tx.clone(), &mut hooks);
+        let io = spawn("launcher-io", Box::new(move || io_worker.run(io_rx)));
+        let scan_worker = Scan::new(cfg, out.clone(), search_tx.clone(), &mut hooks);
+        #[cfg(test)]
+        let fail_scan = hooks.fail_scan_spawn;
+        #[cfg(not(test))]
+        let fail_scan = false;
+        let scan = if fail_scan {
+            None
+        } else {
+            spawn("launcher-scan", Box::new(move || scan_worker.run(scan_rx)))
+        };
+
+        let mut e = Engine {
             search_tx,
             io_tx,
+            scan_tx,
             search,
             io,
+            scan,
             counters,
+        };
+        if e.search.is_none() || e.io.is_none() || e.scan.is_none() {
+            e.shutdown();
+            out.problem_deferred(ProblemKind::ThreadStart);
         }
+        e
+    }
+
+    /// False when the threads did not start or `shutdown` has run.
+    pub fn is_running(&self) -> bool {
+        self.search.is_some() && self.io.is_some() && self.scan.is_some()
     }
 
     fn to_search(&self, m: SearchMsg) {
@@ -330,10 +416,14 @@ impl Engine {
         self.to_io(IoMsg::ImportPins(list));
     }
 
-    /// The panel opened: reload what changed on disk, then report the Start
-    /// page.
+    /// The panel opened: reload what changed on disk (and check again that
+    /// the recent files exist), retry a failed save of the history, then
+    /// report the Start page.
     pub fn refresh(&self) {
-        self.to_io(IoMsg::Refresh);
+        self.to_search(SearchMsg::Opened);
+        if self.scan_tx.send(ScanMsg::Refresh).is_err() {
+            log::debug!("scan worker is gone; message dropped");
+        }
     }
 
     pub fn stats(&self) -> Stats {
@@ -350,14 +440,20 @@ impl Engine {
         self.to_search(SearchMsg::TestPanic);
     }
 
-    /// Stops both threads and waits for them. Writes already requested are
-    /// finished first. Safe to call twice; later calls do nothing.
+    /// Stops the workers and waits for them, but for 2 s at most: a worker
+    /// stuck in a slow file system call (a dead network mount) is left to
+    /// finish by itself and the engine is dropped anyway. Writes already
+    /// requested are finished first, by the workers that are not stuck. Safe
+    /// to call twice; later calls do nothing.
     pub fn shutdown(&mut self) {
+        let end = Instant::now() + SHUTDOWN_WAIT;
         // Search first: it may still queue a write for the IO worker.
         let _ = self.search_tx.send(SearchMsg::Shutdown);
-        join(self.search.take());
+        join_until(self.search.take(), end);
         let _ = self.io_tx.send(IoMsg::Shutdown);
-        join(self.io.take());
+        let _ = self.scan_tx.send(ScanMsg::Shutdown);
+        join_until(self.io.take(), end);
+        join_until(self.scan.take(), end);
     }
 }
 
@@ -367,11 +463,23 @@ impl Drop for Engine {
     }
 }
 
-fn join(h: Option<JoinHandle<()>>) {
+/// Waits for a thread until `end`; past that the thread is detached (it has
+/// been told to stop and ends on its own) and a warning is logged.
+fn join_until(h: Option<JoinHandle<()>>, end: Instant) {
     let Some(h) = h else { return };
     // Never wait for ourselves (an Engine dropped inside the callback).
     if h.thread().id() == thread::current().id() {
         return;
+    }
+    while !h.is_finished() {
+        if Instant::now() >= end {
+            log::warn!(
+                "{} did not stop in time; left running",
+                h.thread().name().unwrap_or("worker")
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(2));
     }
     if h.join().is_err() {
         log::error!("a worker thread ended with a panic");
@@ -408,6 +516,8 @@ struct Search {
     query: Query,
     selected: Option<String>,
     recent_dirty: bool,
+    /// A write of `usage.tsv` failed: send the history again.
+    unsaved: bool,
 }
 
 impl Search {
@@ -431,6 +541,7 @@ impl Search {
             query: Query::default(),
             selected: None,
             recent_dirty: false,
+            unsaved: false,
         }
     }
 
@@ -464,6 +575,15 @@ impl Search {
             }
         }
         self.finish_pending(&rx);
+        // Failures reported while stopping still count: try the write again.
+        while let Ok(m) = rx.try_recv() {
+            if matches!(m, SearchMsg::UsageWriteFailed) {
+                self.unsaved = true;
+            }
+        }
+        if self.usage_loaded {
+            self.guarded(Search::flush_usage);
+        }
         log::debug!("search worker stopped");
     }
 
@@ -476,8 +596,12 @@ impl Search {
             match rx.recv_timeout(left) {
                 Ok(m @ SearchMsg::UsageLoaded(_)) => self.guarded(|s| s.handle(m)),
                 Ok(_) => {}
-                Err(_) => {
-                    log::warn!("history changes lost: the history never loaded");
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    log::warn!("history changes lost: the history did not load in time");
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    log::warn!("history changes lost: the IO worker is gone");
                     break;
                 }
             }
@@ -524,7 +648,14 @@ impl Search {
             }
             SearchMsg::SettingsLoaded(s) => self.sources.settings = s,
             SearchMsg::PathLoaded(p) => self.sources.path = p,
-            SearchMsg::Opened => self.recent_dirty = true,
+            SearchMsg::UsageWriteFailed => self.unsaved = true,
+            SearchMsg::Opened => {
+                self.recent_dirty = true;
+                // Retry a write that failed.
+                if self.usage_loaded {
+                    self.flush_usage();
+                }
+            }
             #[cfg(test)]
             SearchMsg::TestPanic => panic!("injected"),
             SearchMsg::Shutdown => {}
@@ -596,11 +727,12 @@ impl Search {
 
     /// Hands the IO worker a snapshot to write, if anything changed.
     fn flush_usage(&mut self) {
-        if !self.usage.is_dirty() {
+        if !self.usage.is_dirty() && !self.unsaved {
             return;
         }
         let bytes = self.usage.to_bytes();
         self.usage.mark_clean();
+        self.unsaved = false;
         if self.io.send(IoMsg::WriteUsage(bytes)).is_err() {
             log::debug!("io worker is gone; usage not saved");
         }
@@ -610,6 +742,7 @@ impl Search {
         if self.usage_loaded {
             self.usage.clear();
             self.usage.mark_clean();
+            self.unsaved = false;
         } else if self.pending.len() < MAX_PENDING_OPS {
             self.pending.push(Pending::Clear);
         } else {
@@ -635,6 +768,7 @@ impl Search {
                     // The IO worker has deleted (or will delete) the file.
                     self.usage.clear();
                     self.usage.mark_clean();
+                    self.unsaved = false;
                 }
             }
         }
@@ -651,7 +785,10 @@ impl Search {
                 };
                 // Desktop actions ("app:x.desktop#new-window") are not apps.
                 if let Some(app) = self.sources.catalog.get(desktop_id) {
-                    apps.push(app_item(app, apps.len()));
+                    apps.push(catalog::app_item(
+                        app,
+                        prior(Kind::App) / (1.0 + apps.len() as f32),
+                    ));
                     if apps.len() == RECENT_ROWS {
                         break;
                     }
@@ -660,26 +797,6 @@ impl Search {
         }
         let files = self.sources.recent.recent(RECENT_ROWS, &self.sources.home);
         self.out.send(Update::Recent { apps, files });
-    }
-}
-
-fn app_item(app: &AppEntry, rank: usize) -> ResultItem {
-    let subtitle = if app.generic_name.is_empty() {
-        &app.comment
-    } else {
-        &app.generic_name
-    };
-    ResultItem {
-        id: format!("app:{}", app.desktop_id),
-        kind: Kind::App,
-        title: app.name.clone(),
-        subtitle: subtitle.clone(),
-        icon: app.icon.clone(),
-        score: prior(Kind::App) / (1.0 + rank as f32),
-        action: Action::LaunchApp {
-            desktop_id: app.desktop_id.clone(),
-            action: None,
-        },
     }
 }
 
@@ -692,30 +809,44 @@ fn stamp(p: &Path) -> Stamp {
     Some((m.modified().ok()?, m.len()))
 }
 
+/// Reads of the user's small files at start, and every write. Nothing slow
+/// runs here, so a write never waits behind a scan.
 struct Io {
-    cfg: EngineConfig,
+    state_dir: PathBuf,
+    config_dir: PathBuf,
+    system_pins: PathBuf,
     out: Emitter,
     search: Sender<SearchMsg>,
     pins: Pins,
     /// Whether the user has a `pinned.list` (or one that could not be read,
     /// which must not be replaced by an import).
     user_pins: bool,
-    xbel_stamp: Stamp,
-    settings_stamp: Stamp,
-    path: Arc<PathCache>,
+    #[cfg(test)]
+    load_gate: Option<Receiver<()>>,
+    #[cfg(test)]
+    write_fail: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    panic_usage: bool,
 }
 
 impl Io {
-    fn new(cfg: EngineConfig, out: Emitter, search: Sender<SearchMsg>) -> Io {
+    fn new(cfg: &EngineConfig, out: Emitter, search: Sender<SearchMsg>, hooks: &mut Hooks) -> Io {
+        #[cfg(not(test))]
+        let _ = hooks;
         Io {
-            cfg,
+            state_dir: cfg.state_dir.clone(),
+            config_dir: cfg.config_dir.clone(),
+            system_pins: cfg.system_pins.clone(),
             out,
             search,
             pins: Pins::default(),
             user_pins: false,
-            xbel_stamp: None,
-            settings_stamp: None,
-            path: Arc::new(PathCache::default()),
+            #[cfg(test)]
+            load_gate: hooks.load_gate.take(),
+            #[cfg(test)]
+            write_fail: hooks.write_fail.take(),
+            #[cfg(test)]
+            panic_usage: hooks.panic_usage,
         }
     }
 
@@ -726,7 +857,7 @@ impl Io {
     }
 
     fn run(mut self, rx: Receiver<IoMsg>) {
-        self.guarded(Io::load_all);
+        self.load_all();
         // Blocks; no timers. Ends on Shutdown or when every sender is gone.
         while let Ok(m) = rx.recv() {
             if matches!(m, IoMsg::Shutdown) {
@@ -737,6 +868,7 @@ impl Io {
         log::debug!("io worker stopped");
     }
 
+    /// Runs one unit of work; a panic is reported and the worker goes on.
     fn guarded(&mut self, f: impl FnOnce(&mut Io)) {
         if catch_unwind(AssertUnwindSafe(|| f(self))).is_err() {
             log::error!("io worker caught a panic");
@@ -746,20 +878,20 @@ impl Io {
 
     fn handle(&mut self, m: IoMsg) {
         match m {
-            IoMsg::Refresh => self.refresh(),
             IoMsg::Pin(id) => self.change_pins(|p| p.pin(&id)),
             IoMsg::Unpin(id) => self.change_pins(|p| p.unpin(&id)),
             IoMsg::MovePin(id, i) => self.change_pins(|p| p.move_to(&id, i)),
             IoMsg::ImportPins(list) => self.import_pins(&list),
             IoMsg::WriteUsage(bytes) => {
-                let path = self.cfg.state_dir.join(USAGE_FILE);
-                if let Err(e) = write_atomic(&path, &bytes, 0o600) {
+                if let Err(e) = self.write_usage(&bytes) {
                     log::warn!("usage not saved: {}", io_kind(&e));
+                    // The search worker keeps the history and sends it again.
+                    self.to_search(SearchMsg::UsageWriteFailed);
                     self.out.problem(ProblemKind::UsageWriteFailed);
                 }
             }
             IoMsg::ClearUsage => {
-                let path = self.cfg.state_dir.join(USAGE_FILE);
+                let path = self.state_dir.join(USAGE_FILE);
                 let r = match std::fs::remove_file(&path) {
                     Ok(()) => Ok(()),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -774,24 +906,58 @@ impl Io {
         }
     }
 
-    /// Everything read at start: history, pins, then the slower sources.
+    fn write_usage(&self, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .write_fail
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
+        {
+            return Err(std::io::Error::other("injected"));
+        }
+        write_atomic(&self.state_dir.join(USAGE_FILE), bytes, 0o600)
+    }
+
+    /// What is read at start: stale temp files, history, pins. Each stage is
+    /// guarded on its own, and the search worker always gets a history (empty
+    /// when the stage failed), so changes waiting for it are never stuck.
     fn load_all(&mut self) {
-        let swept = sweep_stale_temps(&self.cfg.state_dir, USAGE_FILE, STALE_TEMP_AGE)
-            + sweep_stale_temps(&self.cfg.config_dir, PINS_FILE, STALE_TEMP_AGE);
-        if swept > 0 {
+        #[cfg(test)]
+        if let Some(gate) = self.load_gate.take() {
+            let _ = gate.recv_timeout(Duration::from_secs(10));
+        }
+        let (state, config) = (self.state_dir.clone(), self.config_dir.clone());
+        if let Some(swept) = self.stage(|_| {
+            sweep_stale_temps(&state, USAGE_FILE, STALE_TEMP_AGE)
+                + sweep_stale_temps(&config, PINS_FILE, STALE_TEMP_AGE)
+        }) && swept > 0
+        {
             log::info!("removed {swept} stale temp files");
         }
-        let usage = self.load_usage();
+        let usage = self.stage(Io::load_usage).unwrap_or_default();
         self.to_search(SearchMsg::UsageLoaded(usage));
-        self.load_pins();
+        self.guarded(Io::load_pins);
         self.out.send(Update::Pins(self.pins.ids().to_vec()));
-        self.reload_recent();
-        self.reload_settings();
-        self.rescan_path();
+    }
+
+    /// Like `guarded`, but returns the result (None after a panic).
+    fn stage<T>(&mut self, f: impl FnOnce(&mut Io) -> T) -> Option<T> {
+        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                log::error!("io worker caught a panic");
+                self.out.problem(ProblemKind::Panicked);
+                None
+            }
+        }
     }
 
     fn load_usage(&mut self) -> UsageStore {
-        let path = self.cfg.state_dir.join(USAGE_FILE);
+        #[cfg(test)]
+        if self.panic_usage {
+            panic!("injected");
+        }
+        let path = self.state_dir.join(USAGE_FILE);
         match read_capped(&path, usage::MAX_FILE_BYTES) {
             Ok(Some(bytes)) => {
                 let store = UsageStore::load(&bytes);
@@ -811,13 +977,13 @@ impl Io {
     }
 
     fn load_pins(&mut self) {
-        let user = self.cfg.config_dir.join(PINS_FILE);
+        let user = self.config_dir.join(PINS_FILE);
         let read = match read_capped(&user, pins::MAX_FILE_BYTES) {
             Ok(Some(b)) => {
                 self.user_pins = true;
                 Ok(Some(b))
             }
-            Ok(None) => read_capped(&self.cfg.system_pins, pins::MAX_FILE_BYTES),
+            Ok(None) => read_capped(&self.system_pins, pins::MAX_FILE_BYTES),
             Err(e) => {
                 // It exists; an import must not replace it.
                 self.user_pins = true;
@@ -860,7 +1026,7 @@ impl Io {
     }
 
     fn save_pins(&mut self) {
-        let path = self.cfg.config_dir.join(PINS_FILE);
+        let path = self.config_dir.join(PINS_FILE);
         match write_atomic(&path, &self.pins.to_bytes(), 0o600) {
             Ok(()) => self.user_pins = true,
             Err(e) => {
@@ -870,11 +1036,82 @@ impl Io {
         }
         self.out.send(Update::Pins(self.pins.ids().to_vec()));
     }
+}
+
+/// The slow reads: recent files (with one `stat` per entry), the Settings
+/// index and the `PATH` scan. On its own thread so that nothing here can hold
+/// up a write.
+struct Scan {
+    xbel: PathBuf,
+    settings_index: PathBuf,
+    path_var: String,
+    locales: Vec<String>,
+    out: Emitter,
+    search: Sender<SearchMsg>,
+    xbel_stamp: Stamp,
+    settings_stamp: Stamp,
+    recent: Arc<RecentFiles>,
+    path: Arc<PathCache>,
+    #[cfg(test)]
+    gate: Option<Receiver<()>>,
+}
+
+impl Scan {
+    fn new(cfg: EngineConfig, out: Emitter, search: Sender<SearchMsg>, hooks: &mut Hooks) -> Scan {
+        #[cfg(not(test))]
+        let _ = hooks;
+        Scan {
+            xbel: cfg.xbel,
+            settings_index: cfg.settings_index,
+            path_var: cfg.path_var,
+            locales: cfg.locales,
+            out,
+            search,
+            xbel_stamp: None,
+            settings_stamp: None,
+            recent: Arc::new(RecentFiles::default()),
+            path: Arc::new(PathCache::default()),
+            #[cfg(test)]
+            gate: hooks.scan_gate.take(),
+        }
+    }
+
+    fn to_search(&self, m: SearchMsg) {
+        if self.search.send(m).is_err() {
+            log::debug!("search worker is gone; message dropped");
+        }
+    }
+
+    fn run(mut self, rx: Receiver<ScanMsg>) {
+        #[cfg(test)]
+        if let Some(gate) = self.gate.take() {
+            let _ = gate.recv_timeout(Duration::from_secs(5));
+        }
+        self.guarded(Scan::reload_recent);
+        self.guarded(Scan::reload_settings);
+        self.guarded(Scan::rescan_path);
+        // Blocks; no timers. Ends on Shutdown or when every sender is gone.
+        while let Ok(m) = rx.recv() {
+            match m {
+                ScanMsg::Shutdown => break,
+                ScanMsg::Refresh => self.refresh(),
+            }
+        }
+        log::debug!("scan worker stopped");
+    }
+
+    /// Runs one stage; a panic is reported and the worker goes on.
+    fn guarded(&mut self, f: impl FnOnce(&mut Scan)) {
+        if catch_unwind(AssertUnwindSafe(|| f(self))).is_err() {
+            log::error!("scan worker caught a panic");
+            self.out.problem(ProblemKind::Panicked);
+        }
+    }
 
     fn reload_recent(&mut self) {
         // Stat before reading: a change during the read is seen next time.
-        self.xbel_stamp = stamp(&self.cfg.xbel);
-        let recent = match RecentFiles::load(&self.cfg.xbel) {
+        self.xbel_stamp = stamp(&self.xbel);
+        let recent = match RecentFiles::load(&self.xbel) {
             Ok(mut r) => {
                 r.retain_existing();
                 if r.malformed {
@@ -896,12 +1133,22 @@ impl Io {
             }
         };
         log::debug!("recent files: {}", recent.items.len());
-        self.to_search(SearchMsg::RecentLoaded(Arc::new(recent)));
+        self.recent = Arc::new(recent);
+        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent)));
+    }
+
+    /// The list is unchanged, but files may have been deleted since: filter
+    /// again.
+    fn recheck_recent(&mut self) {
+        let mut r = (*self.recent).clone();
+        r.retain_existing();
+        self.recent = Arc::new(r);
+        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent)));
     }
 
     fn reload_settings(&mut self) {
-        self.settings_stamp = stamp(&self.cfg.settings_index);
-        let index = match SettingsIndex::load(&self.cfg.settings_index, &self.cfg.locales) {
+        self.settings_stamp = stamp(&self.settings_index);
+        let index = match SettingsIndex::load(&self.settings_index, &self.locales) {
             Ok(i) => {
                 log::debug!("settings index: {} entries, {} skipped", i.len(), i.skipped);
                 Some(Arc::new(i))
@@ -928,7 +1175,7 @@ impl Io {
 
     fn rescan_path(&mut self) {
         let started = Instant::now();
-        self.path = Arc::new(PathCache::scan(&self.cfg.path_var));
+        self.path = Arc::new(PathCache::scan(&self.path_var));
         log::debug!(
             "PATH scan: {} names in {} ms",
             self.path.len(),
@@ -937,24 +1184,26 @@ impl Io {
         self.to_search(SearchMsg::PathLoaded(Arc::clone(&self.path)));
     }
 
-    /// The panel opened: one stat per source, reload only what changed.
+    /// The panel opened: one stat per source, reload only what changed. The
+    /// recent files are checked for existence every time.
     fn refresh(&mut self) {
-        if stamp(&self.cfg.xbel) != self.xbel_stamp {
-            self.reload_recent();
+        if stamp(&self.xbel) != self.xbel_stamp {
+            self.guarded(Scan::reload_recent);
+        } else {
+            self.guarded(Scan::recheck_recent);
         }
-        if stamp(&self.cfg.settings_index) != self.settings_stamp {
-            self.reload_settings();
+        if stamp(&self.settings_index) != self.settings_stamp {
+            self.guarded(Scan::reload_settings);
         }
         if self.path.is_stale() {
-            self.rescan_path();
+            self.guarded(Scan::rescan_path);
         }
-        self.to_search(SearchMsg::Opened);
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::result::Action;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -1029,13 +1278,36 @@ mod tests {
     }
 
     /// Shuts down on a helper thread so a hang fails the test.
-    fn stop(mut e: Engine) {
+    fn stop(e: Engine) {
+        stop_after(e, || {});
+    }
+
+    /// Starts the shutdown, then runs `release` (which lets a held worker go)
+    /// 100 ms later; returns how long the shutdown took.
+    fn stop_after(mut e: Engine, release: impl FnOnce()) -> Duration {
         let (tx, rx) = mpsc::channel();
+        let began = Instant::now();
         thread::spawn(move || {
             e.shutdown();
             let _ = tx.send(());
         });
+        thread::sleep(Duration::from_millis(100));
+        release();
         rx.recv_timeout(WAIT).expect("shutdown hung");
+        began.elapsed()
+    }
+
+    fn start_hooked(f: &Fixture, hooks: Hooks) -> (Engine, Receiver<Update>) {
+        let (tx, rx) = mpsc::channel();
+        let e = Engine::start_with(
+            f.cfg.clone(),
+            SearchOptions::default(),
+            Box::new(move |u| {
+                let _ = tx.send(u);
+            }),
+            hooks,
+        );
+        (e, rx)
     }
 
     fn app(id: &str, name: &str) -> AppEntry {
@@ -1198,10 +1470,20 @@ mod tests {
     #[test]
     fn record_before_load_is_kept() {
         let f = fixture();
-        let (e, _rx) = start(&f);
-        // No wait for the load: the change is held until the file is read.
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (e, _rx) = start_hooked(
+            &f,
+            Hooks {
+                load_gate: Some(gate_rx),
+                ..Hooks::default()
+            },
+        );
+        // The history cannot load yet: the change is held, then applied and
+        // written once the load is released during shutdown.
         e.record("alpha".into(), "app:alpha-viewer.desktop".into());
-        stop(e);
+        stop_after(e, || {
+            let _ = gate_tx.send(());
+        });
         let text = std::fs::read_to_string(f.cfg.state_dir.join(USAGE_FILE)).unwrap();
         assert!(text.contains("app:alpha-viewer.desktop"));
     }
@@ -1365,6 +1647,33 @@ mod tests {
         std::fs::create_dir_all(&f.cfg.state_dir).unwrap();
         let file = f.cfg.state_dir.join(USAGE_FILE);
         std::fs::write(&file, vec![b'x'; (usage::MAX_FILE_BYTES + 10) as usize]).unwrap();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (e, rx) = start_hooked(
+            &f,
+            Hooks {
+                load_gate: Some(gate_rx),
+                ..Hooks::default()
+            },
+        );
+        // A use recorded while the bad file is still loading replaces it.
+        e.record("alpha".into(), "app:alpha-viewer.desktop".into());
+        stop_after(e, || {
+            let _ = gate_tx.send(());
+        });
+        assert!(
+            rx.try_iter()
+                .any(|u| matches!(u, Update::Problem(ProblemKind::UsageUnreadable)))
+        );
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("alpha-viewer"));
+    }
+
+    #[test]
+    fn oversized_usage_starts_empty() {
+        let f = fixture();
+        std::fs::create_dir_all(&f.cfg.state_dir).unwrap();
+        let file = f.cfg.state_dir.join(USAGE_FILE);
+        std::fs::write(&file, vec![b'x'; (usage::MAX_FILE_BYTES + 10) as usize]).unwrap();
         let (e, rx) = start(&f);
         wait(&rx, |u| {
             matches!(u, Update::Problem(ProblemKind::UsageUnreadable)).then_some(())
@@ -1372,11 +1681,7 @@ mod tests {
         e.set_apps(two_apps());
         e.query(1, "alpha".into());
         assert_eq!(results(&rx, 1)[0].id, "app:alpha-editor.desktop");
-        // A new use replaces the bad file.
-        e.record("alpha".into(), "app:alpha-viewer.desktop".into());
         stop(e);
-        let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.contains("alpha-viewer"));
     }
 
     #[test]
@@ -1416,11 +1721,13 @@ mod tests {
     fn a_panicking_callback_does_not_kill_the_engine() {
         let f = fixture();
         let (tx, rx) = mpsc::channel();
+        let (seen_tx, seen_rx) = mpsc::channel::<()>();
         let e = Engine::start(
             f.cfg.clone(),
             SearchOptions::default(),
             Box::new(move |u| {
                 if matches!(u, Update::Results { serial: 1, .. }) {
+                    let _ = seen_tx.send(());
                     panic!("callback");
                 }
                 let _ = tx.send(u);
@@ -1428,8 +1735,138 @@ mod tests {
         );
         e.set_apps(two_apps());
         e.query(1, "alpha".into());
+        seen_rx
+            .recv_timeout(WAIT)
+            .expect("the first result never came");
         e.query(2, "alpha".into());
         assert!(!results(&rx, 2).is_empty());
+        assert!(e.stats().queries_computed >= 2);
+        stop(e);
+    }
+
+    #[test]
+    fn a_failed_usage_stage_still_loads_an_empty_history() {
+        let f = fixture();
+        let (e, rx) = start_hooked(
+            &f,
+            Hooks {
+                panic_usage: true,
+                ..Hooks::default()
+            },
+        );
+        wait(&rx, |u| {
+            matches!(u, Update::Problem(ProblemKind::Panicked)).then_some(())
+        });
+        // The pins stage still ran.
+        pins_update(&rx);
+        e.record("alpha".into(), "app:alpha-viewer.desktop".into());
+        let took = stop_after(e, || {});
+        assert!(
+            took < Duration::from_millis(1500),
+            "shutdown waited: {took:?}"
+        );
+        let text = std::fs::read_to_string(f.cfg.state_dir.join(USAGE_FILE)).unwrap();
+        assert!(text.contains("alpha-viewer"));
+    }
+
+    #[test]
+    fn a_failed_write_is_retried() {
+        let f = fixture();
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (e, rx) = start_hooked(
+            &f,
+            Hooks {
+                write_fail: Some(Arc::clone(&fail)),
+                ..Hooks::default()
+            },
+        );
+        pins_update(&rx);
+        let file = f.cfg.state_dir.join(USAGE_FILE);
+        e.record("alpha".into(), "app:alpha-viewer.desktop".into());
+        wait(&rx, |u| {
+            matches!(u, Update::Problem(ProblemKind::UsageWriteFailed)).then_some(())
+        });
+        assert!(!file.exists());
+        // The panel opening sends the history again.
+        fail.store(false, Ordering::SeqCst);
+        e.refresh();
+        let end = Instant::now() + WAIT;
+        while !file.exists() {
+            assert!(Instant::now() < end, "the retry never wrote the file");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("alpha-viewer")
+        );
+        // A failure followed by shutdown is retried at shutdown.
+        fail.store(true, Ordering::SeqCst);
+        e.record("alpha".into(), "app:alpha-editor.desktop".into());
+        wait(&rx, |u| {
+            matches!(u, Update::Problem(ProblemKind::UsageWriteFailed)).then_some(())
+        });
+        fail.store(false, Ordering::SeqCst);
+        stop(e);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("alpha-editor") && text.contains("alpha-viewer"));
+    }
+
+    #[test]
+    fn shutdown_is_bounded_when_a_scan_is_stuck() {
+        let f = fixture();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (e, rx) = start_hooked(
+            &f,
+            Hooks {
+                scan_gate: Some(gate_rx),
+                ..Hooks::default()
+            },
+        );
+        // Writes do not wait behind the stuck scan.
+        pins_update(&rx);
+        e.pin("a.desktop".into());
+        assert_eq!(pins_update(&rx), ["a.desktop"]);
+        e.record("alpha".into(), "app:alpha-viewer.desktop".into());
+        let took = stop_after(e, || {});
+        assert!(took < Duration::from_secs(4), "shutdown took {took:?}");
+        assert!(f.cfg.config_dir.join(PINS_FILE).exists());
+        assert!(f.cfg.state_dir.join(USAGE_FILE).exists());
+        drop(gate_tx);
+    }
+
+    #[test]
+    fn a_thread_that_cannot_start_leaves_an_inert_engine() {
+        let f = fixture();
+        let (e, rx) = start_hooked(
+            &f,
+            Hooks {
+                fail_scan_spawn: true,
+                ..Hooks::default()
+            },
+        );
+        wait(&rx, |u| {
+            matches!(u, Update::Problem(ProblemKind::ThreadStart)).then_some(())
+        });
+        assert!(!e.is_running());
+        assert_eq!(e.stats().problems, 1);
+        e.query(1, "alpha".into());
+        e.pin("a.desktop".into());
+        e.refresh();
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        stop(e);
+    }
+
+    #[test]
+    fn refresh_drops_recent_files_deleted_since() {
+        let f = fixture();
+        write_xbel(&f, &["one.txt", "two.txt"]);
+        let (e, rx) = start(&f);
+        recent_files(&rx, 2);
+        std::fs::remove_file(f.cfg.home.join("two.txt")).unwrap();
+        e.refresh();
+        let files = recent_files(&rx, 1);
+        assert_eq!(files[0].title, "one.txt");
         stop(e);
     }
 
