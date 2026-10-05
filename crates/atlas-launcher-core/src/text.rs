@@ -39,6 +39,9 @@ pub fn is_unsafe_char(c: char) -> bool {
             | '\u{2800}' // braille blank
             | '\u{FFFC}' // object replacement
             | '\u{1D173}'..='\u{1D17A}' // musical formatting
+            | '\u{1BCA0}'..='\u{1BCA3}' // shorthand format controls
+            | '\u{13430}'..='\u{1343F}' // hieroglyph format controls
+            | '\u{FFF0}'..='\u{FFF8}' // unassigned specials
             | '\u{2028}' | '\u{2029}') // line and paragraph separators
 }
 
@@ -486,6 +489,9 @@ mod tests {
             '\u{E01EF}',
             '\u{1D173}',
             '\u{1D17A}',
+            '\u{1BCA0}',
+            '\u{1343F}',
+            '\u{FFF0}',
         ] {
             assert!(is_unsafe_char(c), "{c:?}");
         }

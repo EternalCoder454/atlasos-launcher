@@ -112,8 +112,9 @@ pub fn valid_link(link: &str) -> bool {
 /// `LANGUAGE` colon list first, then the first set of `LC_ALL`,
 /// `LC_MESSAGES` and `LANG`. "de_DE.UTF-8@euro" gives ["de_DE", "de", "C"],
 /// and "de_DE:fr" gives ["de_DE", "de", "fr", "C"]. "C" and "POSIX" add
-/// nothing. When the first non-empty of the three is "C", "POSIX" or
-/// "C.UTF-8" and so on, `LANGUAGE` is ignored and the result is ["C"].
+/// nothing. When the first non-empty of the three is exactly "C" or
+/// "POSIX", `LANGUAGE` is ignored and the result is ["C"], as glibc does;
+/// "C.UTF-8" keeps `LANGUAGE`.
 /// Always ends with "C".
 pub fn locale_chain(
     language: Option<&str>,
@@ -148,10 +149,9 @@ pub fn locale_chain(
         .into_iter()
         .flatten()
         .find(|v| !v.is_empty());
-    // gettext: with the locale itself "C" or "POSIX", LANGUAGE is ignored.
-    let is_c = category
-        .and_then(|v| v.split(['.', '@']).next())
-        .is_some_and(|b| b == "C" || b == "POSIX");
+    // glibc's gettext ignores LANGUAGE only for the exact "C" locale
+    // (setlocale names POSIX "C"); C.UTF-8 keeps it.
+    let is_c = category.is_some_and(|v| v == "C" || v == "POSIX");
     if is_c {
         return vec!["C".to_owned()];
     }
@@ -421,7 +421,10 @@ mod tests {
         assert_eq!(lc(None, None, None, Some("POSIX")), ["C"]);
         // A C locale makes gettext ignore LANGUAGE.
         assert_eq!(lc(Some("de:fr"), None, None, Some("C")), ["C"]);
-        assert_eq!(lc(Some("de"), Some("C.UTF-8"), None, Some("fr")), ["C"]);
+        assert_eq!(
+            lc(Some("de"), Some("C.UTF-8"), None, Some("fr")),
+            ["de", "C"]
+        );
         assert_eq!(lc(Some("de"), None, Some("POSIX"), None), ["C"]);
         // An empty LC_ALL is skipped, so LANG decides; a real locale keeps LANGUAGE.
         assert_eq!(lc(Some("de"), Some(""), None, Some("C")), ["C"]);
