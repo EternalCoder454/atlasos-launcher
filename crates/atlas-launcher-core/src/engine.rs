@@ -218,13 +218,12 @@ enum SearchMsg {
     UsageLoaded(UsageStore),
     /// `usage.tsv` could not be written: send the history again later.
     UsageWriteFailed,
-    /// The second field: report the Start page (false when `Opened` follows).
-    RecentLoaded(Arc<RecentFiles>, bool),
+    /// Sent only when the list changed; the Start page is reported again.
+    RecentLoaded(Arc<RecentFiles>),
     SettingsLoaded(Option<Arc<SettingsIndex>>),
     PathLoaded(Arc<PathCache>),
-    /// The panel opened: report the Start page again.
-    Opened,
-    /// The panel opened: only retry a failed save.
+    /// The panel opened: report the Start page again and retry a failed
+    /// save. The scan worker follows with what changed on disk.
     Retry,
     #[cfg(test)]
     TestPanic,
@@ -436,9 +435,10 @@ impl Engine {
         self.to_io(IoMsg::ImportPins(list));
     }
 
-    /// The panel opened: reload what changed on disk (and check again that
-    /// the recent files exist), retry a failed save of the history, then
-    /// report the Start page.
+    /// The panel opened: report the Start page at once, retry a failed save
+    /// of the history, then reload what changed on disk (and check again
+    /// that the recent files exist), reporting the Start page again if the
+    /// recent files changed.
     pub fn refresh(&self) {
         self.to_search(SearchMsg::Retry);
         if self.scan_tx.send(ScanMsg::Refresh).is_err() {
@@ -667,9 +667,9 @@ impl Search {
             SearchMsg::Record { query, id } => self.record(&query, &id),
             SearchMsg::ClearHistory => self.clear_history(),
             SearchMsg::UsageLoaded(store) => self.usage_loaded(store),
-            SearchMsg::RecentLoaded(r, emit) => {
+            SearchMsg::RecentLoaded(r) => {
                 self.sources.recent = r;
-                self.recent_dirty |= emit;
+                self.recent_dirty = true;
             }
             SearchMsg::SettingsLoaded(s) => self.sources.settings = s,
             SearchMsg::PathLoaded(p) => self.sources.path = p,
@@ -680,11 +680,6 @@ impl Search {
                 }
             }
             SearchMsg::Retry => {
-                if self.usage_loaded {
-                    self.flush_usage();
-                }
-            }
-            SearchMsg::Opened => {
                 self.recent_dirty = true;
                 // Retry a write that failed.
                 if self.usage_loaded {
@@ -1099,8 +1094,6 @@ struct Scan {
     settings_stamp: Stamp,
     recent: Arc<RecentFiles>,
     path: Arc<PathCache>,
-    /// The first load is done; later ones are followed by `Opened`.
-    started: bool,
     #[cfg(test)]
     gate: Option<Receiver<()>>,
 }
@@ -1120,7 +1113,6 @@ impl Scan {
             settings_stamp: None,
             recent: Arc::new(RecentFiles::default()),
             path: Arc::new(PathCache::default()),
-            started: false,
             #[cfg(test)]
             gate: hooks.scan_gate.take(),
         }
@@ -1141,7 +1133,6 @@ impl Scan {
         self.guarded(Scan::reload_settings);
         self.guarded(Scan::rescan_path);
         // Blocks; no timers. Ends on Shutdown or when every sender is gone.
-        self.started = true;
         'run: while let Ok(m) = rx.recv() {
             let mut next = Some(m);
             // Opens that queued up while a refresh ran count as one.
@@ -1190,10 +1181,7 @@ impl Scan {
         };
         log::debug!("recent files: {}", recent.items.len());
         self.recent = Arc::new(recent);
-        self.to_search(SearchMsg::RecentLoaded(
-            Arc::clone(&self.recent),
-            !self.started,
-        ));
+        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent)));
     }
 
     /// The list is unchanged, but files may have been deleted since: filter
@@ -1205,7 +1193,7 @@ impl Scan {
             return;
         }
         self.recent = Arc::new(r);
-        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent), false));
+        self.to_search(SearchMsg::RecentLoaded(Arc::clone(&self.recent)));
     }
 
     fn reload_settings(&mut self) {
@@ -1260,8 +1248,6 @@ impl Scan {
         if self.path.is_stale() {
             self.guarded(Scan::rescan_path);
         }
-        // Everything is in place: report the Start page once.
-        self.to_search(SearchMsg::Opened);
     }
 }
 #[cfg(test)]
