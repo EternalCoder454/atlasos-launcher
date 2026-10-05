@@ -7,6 +7,7 @@
 pub mod calc;
 pub mod catalog;
 pub mod commands;
+pub mod engine;
 pub mod fsutil;
 pub mod late;
 pub mod pins;
