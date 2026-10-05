@@ -199,6 +199,7 @@ impl Emitter {
 enum SearchMsg {
     SetApps(Vec<AppEntry>),
     SetOptions(SearchOptions),
+    SetSession(SessionAvailability),
     Query {
         serial: u64,
         text: String,
@@ -377,6 +378,12 @@ impl Engine {
 
     pub fn set_options(&self, opts: SearchOptions) {
         self.to_search(SearchMsg::SetOptions(opts));
+    }
+
+    /// Which session commands exist, when logind or the seat answer after
+    /// the start.
+    pub fn set_session(&self, session: SessionAvailability) {
+        self.to_search(SearchMsg::SetSession(session));
     }
 
     /// Starts query `serial`; the answer is `Update::Results` with the same
@@ -656,6 +663,9 @@ impl Search {
             SearchMsg::SetOptions(o) => {
                 self.opts = o;
                 self.recent_dirty = true;
+            }
+            SearchMsg::SetSession(s) => {
+                self.sources.session = Arc::new(SessionCommands::new(s));
             }
             SearchMsg::Query { serial, text } => self.query(serial, &text),
             SearchMsg::Merge {
@@ -1419,6 +1429,22 @@ mod tests {
         assert!(items.len() >= 3);
         assert_eq!(items.last().unwrap().kind, Kind::Web);
         assert_eq!(items[0].kind, Kind::App);
+        stop(e);
+    }
+
+    #[test]
+    fn session_availability_updates_late() {
+        let f = fixture();
+        let (e, rx) = start(&f);
+        let has = |items: &[ResultItem]| items.iter().any(|i| i.id == "session:hibernate");
+        e.query(1, "hibernate".into());
+        assert!(has(&results(&rx, 1)));
+        e.set_session(SessionAvailability {
+            hibernate: false,
+            switch_user: true,
+        });
+        e.query(2, "hibernate".into());
+        assert!(!has(&results(&rx, 2)));
         stop(e);
     }
 

@@ -15,7 +15,10 @@ qt_policy(SET QTP0004 NEW)
 # atlas-framework-ui's startup code (single instance, window activation), the
 # panel (layer shell, blur), KRunner's plugins, KIO's launch jobs, the global
 # shortcuts and the app catalogue (KService).
-find_package(KF6 6.20 REQUIRED COMPONENTS DBusAddons WindowSystem Runner KIO GlobalAccel Config Service CoreAddons)
+# One find_package per framework: there is no KF6 umbrella package without ECM.
+foreach(framework DBusAddons WindowSystem Runner KIO GlobalAccel Config Service CoreAddons)
+    find_package(KF6${framework} 6.20 REQUIRED)
+endforeach()
 find_package(LayerShellQt 6.4 REQUIRED)
 find_package(Corrosion REQUIRED)
 
@@ -61,7 +64,15 @@ if(NOT EXISTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_QML}/Atlas/Ui/qmldir")
     message(FATAL_ERROR "Atlas.Ui is not installed: install atlas-ui (atlas-framework)")
 endif()
 
-qt_add_executable(atlas-launcher-app cpp/main.cpp)
+qt_add_executable(atlas-launcher-app
+    cpp/main.cpp
+    cpp/panel.cpp cpp/panel.h
+    cpp/dbus.cpp cpp/dbus.h
+    cpp/catalog.cpp cpp/catalog.h
+    cpp/options.cpp cpp/options.h
+    cpp/runners.cpp cpp/runners.h
+    cpp/executor.cpp cpp/executor.h
+    cpp/actions.cpp cpp/actions.h)
 set_target_properties(atlas-launcher-app PROPERTIES OUTPUT_NAME atlas-launcher)
 target_include_directories(atlas-launcher-app PRIVATE "${ATLAS_UI_CRATE_DIR}/include")
 
@@ -72,13 +83,22 @@ qt_add_qml_module(atlas-launcher-app
     VERSION 1.0
     QML_FILES
         qml/Panel.qml
+        qml/LauncherResultList.qml
+        qml/LauncherResultRow.qml
+        qml/LauncherStartPage.qml
+        qml/LauncherAppTile.qml
+        qml/LauncherItemMenu.qml
+        qml/LauncherFooter.qml
+        qml/LauncherLetterGrid.qml
+        qml/LauncherItemIcon.qml
+        qml/LauncherDetailPane.qml
 )
 
 target_link_libraries(atlas-launcher-app PRIVATE
     atlas_launcher
     Qt6::Core Qt6::DBus Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets
     KF6::DBusAddons KF6::WindowSystem KF6::Runner KF6::KIOGui KF6::GlobalAccel
-    KF6::ConfigCore KF6::Service KF6::CoreAddons
+    KF6::ConfigCore KF6::ConfigGui KF6::Service KF6::CoreAddons KF6::KIOCore
     LayerShellQt::Interface)
 
 install(TARGETS atlas-launcher-app RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

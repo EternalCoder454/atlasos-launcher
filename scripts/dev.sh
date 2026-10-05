@@ -35,7 +35,9 @@ tty=()
 [ -t 0 ] && tty=(-it)
 # No SELinux relabelling (:z/:Z) of host folders: it would lock other
 # containers and tools out of them. Labels are off for the container.
-exec podman run --rm --security-opt label=disable "${tty[@]}" \
+# --init: a real PID 1, so timeout, dbus-run-session and the headless
+# runs signal and reap their children as they do outside a container.
+exec podman run --rm --init --security-opt label=disable "${tty[@]}" \
     -v "$repo":/src -w /src \
     -v "$work":/work \
     -v atlas-cargo:/root/.cargo/registry \

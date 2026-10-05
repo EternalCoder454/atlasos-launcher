@@ -187,14 +187,21 @@ writes them, including those for the parts the launcher draws itself:
 
 | Key | Launcher part |
 |---|---|
-| `servicesEnabled` | apps |
+| `krunner_servicesEnabled` | apps |
 | `calculatorEnabled` | calculator |
 | `unitconverterEnabled` | unit conversion |
-| `shellEnabled` | commands |
+| `krunner_shellEnabled` | commands |
 | `krunner_systemsettingsEnabled` | Settings results |
 
 Those five plugins are never run through RunnerManager, so nothing shows
-twice.
+twice; nor are `krunner_sessions`, `baloosearch` (Baloo is removed) and
+`krunner_recentdocuments`, whose rows the launcher's own session commands
+and recent files already give. Each key is read by the installed plugin id
+and, failing that, the bare name. Every other runner runs only when its
+`<id>Enabled` key (or, unset, its metadata default) allows it.
+
+The Settings app, when its D-Bus call fails, starts as
+`net.eterneon.atlas.settings.desktop`.
 
 **Other apps' interfaces, used:**
 
@@ -211,7 +218,19 @@ twice.
   sorted, and `Status() -> a{sv}`. The launcher asks for 20 hits, with
   `kind` and `root` only when the user types a filter, and treats the hits as
   untrusted. The interface also gives `org.freedesktop.FileManager1.ShowItems`.
-- Store: `atlas-store --remove <flatpak id>` with `XDG_ACTIVATION_TOKEN`.
+  Cold start (frozen with Explorer): the index daemon takes its bus name
+  only once its snapshot is mapped and answers from it before any rescan,
+  aiming at 100 ms from activation to the first reply; with no usable
+  snapshot it takes the name at once and answers every `Search` with an
+  empty list (`Status` says "scanning") until its first scan is published.
+  So a first query never waits on a scan, and an empty answer is not an
+  error.
+- Store: `/usr/bin/atlas-store --remove <flatpak id>` with
+  `XDG_ACTIVATION_TOKEN` (agreed with the Store, its commit 7d91af9). The
+  Store validates the id, opens the app's page with its Remove confirmation
+  (never removing without it; Enter can't confirm it) and, if already open,
+  takes the request in its running window. Nothing comes back; the launcher
+  waits for nothing.
 - Plasma: `org.kde.Shutdown` (log out, restart, shut down: chosen from the
   power menu, run at once like Windows), `org.kde.LogoutPrompt` (the same
   chosen from search results: Plasma's prompt with its countdown, so a stray
@@ -424,8 +443,14 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 - **D-Bus methods (any session process):**
   - They can open or hide the panel and type a query, capped at 256
     characters with control and bidi characters stripped; they never run
-    anything. For 300 ms after a D-Bus `Show` that typed a query, Enter is
-    ignored, so another process cannot time a query under the user's Enter.
+    anything. After a D-Bus `Show` that typed a query, Enter runs nothing
+    until the user has edited the query (moving the highlight is not
+    enough), and a click on a result waits 500 ms after the show, so another
+    process cannot line a query up under the user's Enter or click.
+  - An Enter within 150 ms of a late answer (KRunner, files) replacing the
+    top hit of the same query runs nothing, unless the user moved the
+    highlight; and a results row runs only while the list answers the query
+    as typed now.
   - `ImportPins` takes at most 64 ids. Each must match
     `[A-Za-z0-9._-]{1,255}.desktop` or a `preferred://` name and resolve to
     an installed app, and is used only when no `pinned.list` exists.
