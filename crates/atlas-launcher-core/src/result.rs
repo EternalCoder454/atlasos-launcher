@@ -31,7 +31,7 @@ pub enum SessionAction {
 
 /// What running a result does. Paths and links in here were validated where
 /// they entered.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Action {
     /// Start an app from its desktop file id, optionally one of its
     /// desktop actions (KIO::ApplicationLauncherJob).
@@ -71,6 +71,24 @@ pub enum Action {
         runner_id: String,
         match_id: String,
     },
+}
+
+/// Redacted: the variant only (a session action by name); ids, links, URIs,
+/// command lines and text never reach a log.
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Action::LaunchApp { .. } => f.write_str("Action::LaunchApp"),
+            Action::OpenSettings { .. } => f.write_str("Action::OpenSettings"),
+            Action::OpenFile { .. } => f.write_str("Action::OpenFile"),
+            Action::Copy { .. } => f.write_str("Action::Copy"),
+            Action::Run { args, .. } => write!(f, "Action::Run(args: {})", args.len()),
+            Action::RunInTerminal { .. } => f.write_str("Action::RunInTerminal"),
+            Action::Session(a) => write!(f, "Action::Session({a:?})"),
+            Action::OpenWeb { .. } => f.write_str("Action::OpenWeb"),
+            Action::Runner { .. } => f.write_str("Action::Runner"),
+        }
+    }
 }
 
 /// One row of the result list.
@@ -157,6 +175,43 @@ mod tests {
             d.contains("File") && d.contains("0.5") && d.contains("19"),
             "{d}"
         );
+    }
+
+    #[test]
+    fn action_debug_is_redacted() {
+        let all = [
+            Action::LaunchApp {
+                desktop_id: "secret".into(),
+                action: Some("secret".into()),
+            },
+            Action::OpenSettings {
+                link: "secret".into(),
+            },
+            Action::OpenFile {
+                uri: "secret".into(),
+            },
+            Action::Copy {
+                text: "secret".into(),
+            },
+            Action::Run {
+                executable: "secret".into(),
+                args: vec!["secret".into()],
+            },
+            Action::RunInTerminal {
+                line: "secret".into(),
+            },
+            Action::Session(SessionAction::Lock),
+            Action::OpenWeb {
+                url: "secret".into(),
+            },
+            Action::Runner {
+                runner_id: "secret".into(),
+                match_id: "secret".into(),
+            },
+        ];
+        for a in all {
+            assert!(!format!("{a:?}").contains("secret"), "{a:?}");
+        }
     }
 
     #[test]

@@ -176,7 +176,7 @@ impl SessionCommands {
 // Command lines
 
 /// What a typed command line can become.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CommandPlan {
     /// No words at all.
     Empty,
@@ -188,6 +188,20 @@ pub enum CommandPlan {
     /// Uses shell syntax (or has unbalanced quotes): only the terminal's
     /// shell may run it.
     TerminalOnly,
+}
+
+/// Redacted: the kind and word count only, never the command text.
+impl std::fmt::Debug for CommandPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandPlan::Empty => f.write_str("CommandPlan::Empty"),
+            CommandPlan::Direct { args, .. } => f
+                .debug_struct("CommandPlan::Direct")
+                .field("args", &args.len())
+                .finish_non_exhaustive(),
+            CommandPlan::TerminalOnly => f.write_str("CommandPlan::TerminalOnly"),
+        }
+    }
 }
 
 /// Characters that mean shell syntax outside quotes. `[` is here because a
@@ -318,6 +332,11 @@ impl PathCache {
     /// UTF-8). Symlinks count by what they point to. File
     /// IO: call it off the GUI thread.
     pub fn scan(path_var: &str) -> PathCache {
+        Self::scan_with_limits(path_var, MAX_ENTRIES_PER_DIR, MAX_ENTRIES_TOTAL)
+    }
+
+    /// [`PathCache::scan`] with the entry caps as parameters (for tests).
+    fn scan_with_limits(path_var: &str, per_dir: usize, total: usize) -> PathCache {
         let mut cache = PathCache::default();
         let mut seen: HashSet<&str> = HashSet::new();
         let mut visited_total = 0usize;
@@ -335,10 +354,7 @@ impl PathCache {
                 continue;
             };
             for (n, entry) in rd.flatten().enumerate() {
-                if cache.exes.len() >= MAX_NAMES
-                    || n >= MAX_ENTRIES_PER_DIR
-                    || visited_total >= MAX_ENTRIES_TOTAL
-                {
+                if cache.exes.len() >= MAX_NAMES || n >= per_dir || visited_total >= total {
                     break;
                 }
                 visited_total += 1;
@@ -390,6 +406,14 @@ impl PathCache {
     pub fn search(&self, q: &Query) -> Vec<ResultItem> {
         // A query cut at the cap may not be what the user typed: run nothing.
         if q.raw.chars().take(MAX_QUERY_CHARS).count() >= MAX_QUERY_CHARS {
+            return Vec::new();
+        }
+        // A line whose shown text could differ from what runs (odd spaces,
+        // invisible or bidi characters) is offered nothing.
+        if q.raw
+            .chars()
+            .any(|c| (c.is_whitespace() && c != ' ') || is_unsafe_char(c))
+        {
             return Vec::new();
         }
         let line = q.raw.trim();
@@ -744,6 +768,60 @@ mod tests {
         }
         let c = PathCache::scan(t.path().to_str().unwrap());
         assert!(c.is_empty()); // none executable, and the scan ended
+    }
+
+    #[test]
+    fn scan_caps_are_enforced() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        for i in 0..5 {
+            make_exe(&a, &format!("a{i}"), 0o755);
+            make_exe(&b, &format!("b{i}"), 0o755);
+        }
+        let var = format!("{}:{}", a.display(), b.display());
+        let kept = |c: &PathCache, p: char| {
+            (0..5)
+                .filter(|i| c.lookup(&format!("{p}{i}")).is_some())
+                .count()
+        };
+        // Per-dir cap: at most 2 of each folder.
+        let c = PathCache::scan_with_limits(&var, 2, 100);
+        assert_eq!((kept(&c, 'a'), kept(&c, 'b')), (2, 2));
+        // Total cap: 7 entries looked at in all.
+        let c = PathCache::scan_with_limits(&var, 100, 7);
+        assert_eq!(c.len(), 7);
+        // No cap hit: all.
+        assert_eq!(PathCache::scan_with_limits(&var, 100, 100).len(), 10);
+    }
+
+    #[test]
+    fn odd_whitespace_and_invisible_offer_no_rows() {
+        let t = tempfile::tempdir().unwrap();
+        make_exe(t.path(), "mytool", 0o755);
+        let c = PathCache::scan(t.path().to_str().unwrap());
+        assert_eq!(c.search(&q("mytool a")).len(), 2);
+        for bad in ["mytool\u{a0}a", "mytool\u{3000}a", "mytool a\u{2003}"] {
+            assert!(c.search(&q(bad)).is_empty(), "{bad:?}");
+        }
+        // Query::new already strips U+2800 and the like; a hand-built raw
+        // query keeps them and is refused.
+        let mut raw = q("mytool a");
+        raw.raw = "mytool \u{2800}".to_owned();
+        assert!(c.search(&raw).is_empty());
+        // Raw queries built by hand (not through Query::new) too.
+        let mut raw = q("mytool a");
+        raw.raw = "mytool\u{200b}a".to_owned();
+        assert!(c.search(&raw).is_empty());
+        // Tabs become plain spaces in the query, so they show as they run.
+        assert_eq!(c.search(&q("mytool\ta")).len(), 2);
+    }
+
+    #[test]
+    fn plan_debug_is_redacted() {
+        let d = format!("{:?}", direct("secret", &["pw"]));
+        assert!(!d.contains("secret") && !d.contains("pw"));
     }
 
     #[test]

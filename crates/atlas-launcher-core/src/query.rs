@@ -18,6 +18,8 @@ use crate::web::{Engine, web_row};
 
 /// The most rows a query shows, the web row included.
 pub const MAX_RESULTS: usize = 50;
+/// Most rows one late batch may add; the rest are dropped before ranking.
+pub const MAX_LATE_BATCH: usize = 200;
 
 /// What `launcher.conf` and `krunnerrc` turn on (DESIGN.md, "Interfaces").
 #[derive(Clone, Debug, PartialEq)]
@@ -219,6 +221,7 @@ impl ResultSet {
             "the instant phase makes a new set"
         );
         let mut late = late;
+        late.truncate(MAX_LATE_BATCH);
         rank(&mut late, cx);
 
         // Frozen rows: the top hit, and the selected row, by position.
@@ -501,6 +504,19 @@ mod tests {
             now: NOW,
         };
         s.merge(source, late, selected, &cx);
+    }
+
+    #[test]
+    fn late_batch_is_capped_before_ranking() {
+        let mut s = set(&[("a", 0.9)], false);
+        let mut late: Vec<(String, f32)> = (0..MAX_LATE_BATCH)
+            .map(|i| (format!("l{i}"), 0.1))
+            .collect();
+        late.push(("strong".to_owned(), 0.99)); // beyond the cap: dropped
+        let refs: Vec<(&str, f32)> = late.iter().map(|(a, b)| (a.as_str(), *b)).collect();
+        merge(&mut s, Source::Runner, &refs, None);
+        assert!(s.items().iter().all(|i| i.id != "strong"));
+        assert_eq!(s.items().len(), MAX_RESULTS);
     }
 
     #[test]

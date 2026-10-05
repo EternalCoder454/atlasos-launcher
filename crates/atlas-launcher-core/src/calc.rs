@@ -22,8 +22,12 @@ pub enum CalcKind {
     Conversion,
 }
 
+/// The score of an ambiguous answer (a date or an ID that is also valid
+/// arithmetic): it ranks below exact names.
+pub const AMBIGUOUS_SCORE: f32 = 0.5;
+
 /// A calculator answer, ready to show and copy.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Calculation {
     /// The input, normalised, e.g. `5 km → mi`.
     pub expression: String,
@@ -37,6 +41,17 @@ pub struct Calculation {
     /// The input looks like a date or an ID ("2024-05-17", "555-1234",
     /// "12/05/2024") as much as like arithmetic: it ranks below exact names.
     pub ambiguous: bool,
+}
+
+/// Redacted: the kind and flags only, never the typed expression or answer.
+impl std::fmt::Debug for Calculation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Calculation")
+            .field("kind", &self.kind)
+            .field("has_unit", &self.unit.is_some())
+            .field("ambiguous", &self.ambiguous)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Calculation {
@@ -53,7 +68,7 @@ impl Calculation {
             subtitle: self.expression.clone(),
             icon: "accessories-calculator".to_string(),
             score: if self.ambiguous {
-                0.5
+                AMBIGUOUS_SCORE
             } else {
                 prior(Kind::Calculator)
             },
@@ -959,6 +974,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn calculation_debug_is_redacted() {
+        let c = evaluate("123456+1", '.').unwrap();
+        let d = format!("{c:?}");
+        assert!(!d.contains("12345") && d.contains("Math"), "{d}");
+        assert_eq!(AMBIGUOUS_SCORE, 0.5);
+    }
+
+    #[test]
     fn date_and_id_like_input_is_ambiguous() {
         for amb in [
             "2024-05-17",
@@ -970,7 +993,7 @@ mod tests {
         ] {
             let c = evaluate(amb, '.').unwrap_or_else(|| panic!("{amb}"));
             assert!(c.ambiguous, "{amb}");
-            assert!((c.to_result().score - 0.5).abs() < 1e-6, "{amb}");
+            assert_eq!(c.to_result().score, AMBIGUOUS_SCORE, "{amb}");
         }
         for ok in [
             "10-2",

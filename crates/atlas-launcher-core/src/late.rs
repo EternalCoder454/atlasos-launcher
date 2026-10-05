@@ -2,8 +2,10 @@
 //! matches, which C++ hands over as plain data, and Explorer's file hits.
 //! Anything that fails a check is dropped, never shown half-cleaned.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::query::MAX_LATE_BATCH;
 use crate::recent::{RecentFile, file_uri, href_to_path, icon_for, parent_of, tilde, valid_mime};
 use crate::result::{Action, Kind, ResultItem, prior};
 use crate::text::{clean_display, clean_display_max, is_unsafe_char, valid_icon};
@@ -20,7 +22,7 @@ pub use crate::text::MAX_ICON_PATH_BYTES;
 const RUNNER_FALLBACK_ICON: &str = "application-x-executable";
 
 /// One KRunner match, as C++ read it from `KRunner::QueryMatch`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct RunnerMatch {
     pub runner_id: String,
     pub match_id: String,
@@ -34,7 +36,7 @@ pub struct RunnerMatch {
 
 /// One hit of Explorer's `Search1.Search`: (uri, name, kind, mime, icon,
 /// mtime, size, score).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ExplorerHit {
     pub uri: String,
     pub name: String,
@@ -44,6 +46,32 @@ pub struct ExplorerHit {
     pub mtime: i64,
     pub size: u64,
     pub score: f64,
+}
+
+/// Redacted: lengths only, never text, ids or URIs.
+impl fmt::Debug for RunnerMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunnerMatch")
+            .field("runner_id_len", &self.runner_id.len())
+            .field("match_id_len", &self.match_id.len())
+            .field("text_len", &self.text.len())
+            .field("subtext_len", &self.subtext.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Redacted: lengths and the kind class only, never names, paths or URIs.
+impl fmt::Debug for ExplorerHit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExplorerHit")
+            .field("uri_len", &self.uri.len())
+            .field("name_len", &self.name.len())
+            .field(
+                "is_dir",
+                &matches!(self.kind.as_str(), "folder" | "directory" | "dir"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 fn clamp_unit(x: f64) -> f32 {
@@ -117,11 +145,8 @@ pub fn explorer_item(hit: ExplorerHit, home: &Path) -> Option<ResultItem> {
         is_dir,
         path,
     };
-    let icon = if valid_icon(&hit.icon) {
-        hit.icon
-    } else {
-        icon_for(&file)
-    };
+    // The hit's own icon is ignored: the icon comes from the path and mime.
+    let icon = icon_for(&file);
     let kind = if is_dir { Kind::Folder } else { Kind::File };
     Some(ResultItem {
         id: format!("file:{}", file.uri),
@@ -132,6 +157,25 @@ pub fn explorer_item(hit: ExplorerHit, home: &Path) -> Option<ResultItem> {
         score: clamp_unit(hit.score) * prior(kind),
         action: Action::OpenFile { uri: file.uri },
     })
+}
+
+/// The checked rows of a KRunner batch; at most [`MAX_LATE_BATCH`] matches
+/// are looked at.
+pub fn runner_items(matches: Vec<RunnerMatch>) -> Vec<ResultItem> {
+    matches
+        .into_iter()
+        .take(MAX_LATE_BATCH)
+        .filter_map(runner_item)
+        .collect()
+}
+
+/// The checked rows of an Explorer batch; at most [`MAX_LATE_BATCH`] hits
+/// are looked at.
+pub fn explorer_items(hits: Vec<ExplorerHit>, home: &Path) -> Vec<ResultItem> {
+    hits.into_iter()
+        .take(MAX_LATE_BATCH)
+        .filter_map(|h| explorer_item(h, home))
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,7 +288,7 @@ mod tests {
 
         let mut dir = hit("file:///home/u/Projects");
         dir.kind = "folder".into();
-        dir.icon = "../../x".into();
+        dir.icon = "evil-icon".into();
         let d = explorer_item(dir, home).unwrap();
         assert_eq!(d.kind, Kind::Folder);
         assert_eq!(d.icon, "folder");
@@ -254,5 +298,50 @@ mod tests {
         weird.mime = "not a mime".into();
         let w = explorer_item(weird, home).unwrap();
         assert_eq!(w.score, 0.0);
+    }
+
+    #[test]
+    fn explorer_icon_comes_from_the_path() {
+        let home = Path::new("/home/u");
+        let mut h = hit("file:///home/u/a.txt");
+        h.icon = "/etc/passwd".into();
+        let it = explorer_item(h.clone(), home).unwrap();
+        assert_ne!(it.icon, "/etc/passwd");
+        h.icon = "text-x-generic".into();
+        assert_eq!(explorer_item(h, home).unwrap().icon, it.icon);
+    }
+
+    #[test]
+    fn debug_is_redacted() {
+        let r = format!(
+            "{:?}",
+            rm("krunner_secret", "id-secret", "text-secret", 1.0)
+        );
+        assert!(!r.contains("secret"), "{r}");
+        let e = format!("{:?}", hit("file:///home/u/secret.txt"));
+        assert!(!e.contains("secret") && !e.contains("home"), "{e}");
+    }
+
+    #[test]
+    fn batches_are_capped() {
+        let ms: Vec<_> = (0..MAX_LATE_BATCH + 50)
+            .map(|i| rm("r", &format!("m{i}"), "t", 0.5))
+            .collect();
+        let items = runner_items(ms);
+        assert_eq!(items.len(), MAX_LATE_BATCH);
+        assert_eq!(items[0].id, "runner:r:m0");
+        let hs: Vec<_> = (0..MAX_LATE_BATCH + 50)
+            .map(|i| hit(&format!("file:///home/u/f{i}")))
+            .collect();
+        assert_eq!(
+            explorer_items(hs, Path::new("/home/u")).len(),
+            MAX_LATE_BATCH
+        );
+        // Invalid entries inside the first 200 are dropped, not replaced.
+        let mut ms: Vec<_> = (0..MAX_LATE_BATCH + 5)
+            .map(|i| rm("r", &format!("m{i}"), "t", 0.5))
+            .collect();
+        ms[0].runner_id = "bad id".into();
+        assert_eq!(runner_items(ms).len(), MAX_LATE_BATCH - 1);
     }
 }

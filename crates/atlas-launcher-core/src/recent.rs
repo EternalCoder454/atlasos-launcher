@@ -49,7 +49,7 @@ impl fmt::Display for RecentError {
 
 impl std::error::Error for RecentError {}
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct RecentFile {
     /// Canonical `file:` URI (the path percent-encoded again).
     pub uri: String,
@@ -64,8 +64,17 @@ pub struct RecentFile {
     pub is_dir: bool,
 }
 
+/// Redacted: no URI, path, name or mime, only the kind.
+impl fmt::Debug for RecentFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecentFile")
+            .field("is_dir", &self.is_dir)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The parsed list, newest first, one entry per path.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct RecentFiles {
     /// Don't change this directly: `search` keeps a prepared copy of the
     /// names, rebuilt by [`RecentFiles::retain_existing`].
@@ -75,6 +84,16 @@ pub struct RecentFiles {
     pub malformed: bool,
     /// (name, parent folder) prepared for matching, parallel to `items`.
     prepared: Vec<(Prepared, Prepared)>,
+}
+
+/// Redacted: counts only.
+impl fmt::Debug for RecentFiles {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecentFiles")
+            .field("items", &self.items.len())
+            .field("malformed", &self.malformed)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Default)]
@@ -394,8 +413,9 @@ impl RecentFiles {
         Self::parse_at(bytes, now)
     }
 
-    /// [`RecentFiles::parse`] with the clock given: dates after `now` count
-    /// as `now`, so a forged future date can't pin an entry to the top.
+    /// [`RecentFiles::parse`] with the clock given: a date up to a day after
+    /// `now` counts as `now` (clock skew); a later one is forged and counts
+    /// as 0 (unknown), so it sorts last, never to the top.
     fn parse_at(bytes: &[u8], now: i64) -> Result<RecentFiles, RecentError> {
         if bytes.len() > MAX_BYTES {
             return Err(RecentError::TooLarge);
@@ -454,7 +474,11 @@ impl RecentFiles {
             }
         }
         for i in &mut items {
-            i.when = i.when.min(now);
+            i.when = if i.when > now.saturating_add(86_400) {
+                0
+            } else {
+                i.when.min(now)
+            };
         }
         // Newest first; the path breaks ties so equal inputs sort alike.
         items.sort_by(|a, b| b.when.cmp(&a.when).then_with(|| a.path.cmp(&b.path)));
@@ -838,23 +862,45 @@ mod tests {
     }
 
     #[test]
-    fn keeps_newest_500_and_clamps_future() {
+    fn keeps_newest_500() {
         let mut x = String::from("<xbel>");
         for i in 0..700 {
             let d = format!("2020-01-01T00:{:02}:{:02}Z", (i / 60) % 60, i % 60);
             x.push_str(&bm(&format!("/home/u/f{i}"), &d));
         }
-        x.push_str(&bm("/home/u/future", "2999-01-01T00:00:00Z"));
         x.push_str("</xbel>");
         let now = parse_date("2024-01-01T00:00:00Z");
         let r = RecentFiles::parse_at(x.as_bytes(), now).unwrap();
         assert_eq!(r.items.len(), MAX_KEPT);
-        assert_eq!(r.items[0].path, PathBuf::from("/home/u/future"));
-        assert!(r.items.iter().all(|i| i.when <= now));
-        // The future entry is clamped to now, which is after every real one.
-        assert_eq!(r.items[0].when, now);
-        assert_eq!(r.items[1].path, PathBuf::from("/home/u/f699"));
+        assert_eq!(r.items[0].path, PathBuf::from("/home/u/f699"));
         assert_eq!(r.prepared.len(), MAX_KEPT);
+    }
+
+    #[test]
+    fn future_dates_are_skew_or_forged() {
+        let now = parse_date("2024-01-01T00:00:00Z");
+        let x = format!(
+            "<xbel>{}{}{}</xbel>",
+            bm("/home/u/old", "2020-01-01T00:00:00Z"),
+            bm("/home/u/skew", "2024-01-01T12:00:00Z"), // within a day: now
+            bm("/home/u/forged", "2999-01-01T00:00:00Z"), // unknown: 0
+        );
+        let r = RecentFiles::parse_at(x.as_bytes(), now).unwrap();
+        let by = |n: &str| r.items.iter().find(|i| i.path.ends_with(n)).unwrap().when;
+        assert_eq!(by("skew"), now);
+        assert_eq!(by("forged"), 0);
+        assert_eq!(r.items[0].path, PathBuf::from("/home/u/skew"));
+        assert_eq!(r.items[2].path, PathBuf::from("/home/u/forged"));
+    }
+
+    #[test]
+    fn debug_is_redacted() {
+        let r = p(&format!(
+            "<xbel>{}</xbel>",
+            bm("/home/u/secret.txt", "2020-01-01T00:00:00Z")
+        ));
+        let d = format!("{r:?} {:?}", r.items[0]);
+        assert!(!d.contains("secret") && !d.contains("home"), "{d}");
     }
 
     #[test]

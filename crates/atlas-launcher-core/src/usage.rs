@@ -88,18 +88,53 @@ pub fn learnable(id: &str) -> bool {
 }
 
 /// A query's key into the store, computed once per query.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct BoostKey {
     prefix: String,
 }
 
-#[derive(Clone, Debug, Default)]
+/// Redacted: the prefix is what the user typed.
+impl std::fmt::Debug for BoostKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoostKey")
+            .field("prefix_chars", &self.prefix.chars().count())
+            .finish()
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct UsageStore {
     /// result id → query prefix → entry. One map serves both the exact-prefix
     /// lookup and the sum over a result's prefixes.
     by_id: HashMap<String, HashMap<String, Entry>>,
     entries: usize,
     dirty: bool,
+    /// Lines `load` skipped as invalid.
+    skipped: usize,
+}
+
+/// Redacted: counts only, never ids or prefixes.
+impl std::fmt::Debug for UsageStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UsageStore")
+            .field("entries", &self.entries)
+            .field("dirty", &self.dirty)
+            .field("skipped", &self.skipped)
+            .finish()
+    }
+}
+
+/// How far ahead of now a `last` may be (clock changes, forged files).
+const MAX_FUTURE_SECS: i64 = 86_400;
+
+/// A prefix and id the file format can hold and `load` accepts.
+fn key_ok(prefix: &str, id: &str) -> bool {
+    field_ok(prefix)
+        && field_ok(id)
+        && !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && learnable(id)
+        && prefix.chars().count() <= MAX_PREFIX_CHARS
 }
 
 fn field_ok(s: &str) -> bool {
@@ -118,8 +153,9 @@ fn line_len(prefix: &str, id: &str, e: &Entry) -> usize {
 
 /// Characters of an `i64` in decimal, with the sign.
 fn digits(n: i64) -> usize {
+    let sign = n < 0;
     let mut n = n.unsigned_abs();
-    let mut d = usize::from(n == 0);
+    let mut d = usize::from(n == 0) + usize::from(sign);
     while n > 0 {
         d += 1;
         n /= 10;
@@ -134,6 +170,16 @@ impl UsageStore {
     /// more than 256 KiB and 2,000 lines. A last line cut by the size cap is
     /// dropped. Never fails.
     pub fn load(bytes: &[u8]) -> UsageStore {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        Self::load_at(bytes, now)
+    }
+
+    /// [`UsageStore::load`] with the current time given: a `last` more than
+    /// a day after `now` is set to `now` plus a day.
+    pub fn load_at(bytes: &[u8], now: i64) -> UsageStore {
+        let max_last = now.saturating_add(MAX_FUTURE_SECS);
         let mut s = UsageStore::default();
         let cap = MAX_FILE_BYTES as usize;
         let mut b = &bytes[..bytes.len().min(cap)];
@@ -145,7 +191,11 @@ impl UsageStore {
             };
         }
         for line in b.split(|&c| c == b'\n').take(MAX_ENTRIES) {
+            if line.is_empty() {
+                continue;
+            }
             let Ok(line) = std::str::from_utf8(line) else {
+                s.skipped += 1;
                 continue;
             };
             let line = line.strip_suffix('\r').unwrap_or(line);
@@ -153,24 +203,26 @@ impl UsageStore {
             let (Some(prefix), Some(id), Some(count), Some(last), None) =
                 (f.next(), f.next(), f.next(), f.next(), f.next())
             else {
+                s.skipped += 1;
                 continue;
             };
-            if !field_ok(prefix)
-                || !field_ok(id)
-                || id.is_empty()
-                || id.len() > MAX_ID_BYTES
-                || !learnable(id)
-                || prefix.chars().count() > MAX_PREFIX_CHARS
-            {
+            if !key_ok(prefix, id) {
+                s.skipped += 1;
                 continue;
             }
             let (Some(count), Ok(last)) = (parse_count(count), last.parse::<i64>()) else {
+                s.skipped += 1;
                 continue;
             };
-            s.merge(prefix, id, count, last);
+            s.merge(prefix, id, count, last.min(max_last));
         }
         s.dirty = false;
         s
+    }
+
+    /// How many lines `load` skipped as invalid (empty lines don't count).
+    pub fn skipped(&self) -> usize {
+        self.skipped
     }
 
     /// Adds to an entry, or creates it (duplicate lines add up, each decayed
@@ -222,22 +274,24 @@ impl UsageStore {
     /// old count decays to now, then 1 is added. Keeps the store within
     /// 2,000 entries and 256 KiB by dropping the weakest.
     pub fn record(&mut self, q: &Query, id: &str, now: i64) {
-        if id.len() > MAX_ID_BYTES || !learnable(id) || !field_ok(id) {
+        let prefix = prefix_of(q);
+        if !key_ok(&prefix, id) {
             return;
         }
-        let prefix = prefix_of(q);
+        let max_last = now.saturating_add(MAX_FUTURE_SECS);
         let map = self.by_id.entry(id.to_owned()).or_default();
         match map.get_mut(&prefix) {
             Some(e) => {
                 e.count = norm_count(e.count * decay(e.last, now) + 1.0);
-                e.last = now;
+                // The clock may have gone back: never move `last` backwards.
+                e.last = e.last.max(now).min(max_last);
             }
             None => {
                 map.insert(
                     prefix,
                     Entry {
                         count: 1.0,
-                        last: now,
+                        last: now.min(max_last),
                     },
                 );
                 self.entries += 1;
@@ -396,9 +450,64 @@ mod tests {
         data.extend_from_slice(b"\n\nnot a line");
         let s = UsageStore::load(&data);
         assert_eq!(s.len(), 2);
+        assert_eq!(s.skipped(), 21);
         assert!(!s.is_dirty());
         assert!(bo(&s, "fire", "app:a.desktop", 100) > 0.0);
         assert!(bo(&s, "", "app:\u{e9}cran", 50) > 0.0);
+    }
+
+    #[test]
+    fn digits_counts_the_sign() {
+        assert_eq!(digits(0), 1);
+        assert_eq!(digits(1_234), 4);
+        assert_eq!(digits(-1_234), 5);
+        assert_eq!(digits(i64::MIN), i64::MIN.to_string().len());
+    }
+
+    #[test]
+    fn future_and_backwards_clocks() {
+        // A forged far-future `last` is clamped to now + 1 day on load.
+        let s = UsageStore::load_at(b"a\tapp:x\t1\t99999999999\n", NOW);
+        let text = String::from_utf8(s.to_bytes()).unwrap();
+        assert_eq!(text, format!("a\tapp:x\t1\t{}\n", NOW + DAY));
+
+        // `record` with the clock gone backwards keeps `last`, and a record
+        // far in the future is clamped as well.
+        let mut s = UsageStore::default();
+        s.record(&q("a"), "app:x", NOW);
+        s.record(&q("a"), "app:x", NOW - 1_000);
+        let text = String::from_utf8(s.to_bytes()).unwrap();
+        assert!(text.ends_with(&format!("\t{NOW}\n")), "{text}");
+        let mut s = UsageStore::default();
+        s.record(&q("a"), "app:y", NOW + 100 * DAY);
+        s.record(&q("a"), "app:y", NOW);
+        let text = String::from_utf8(s.to_bytes()).unwrap();
+        assert!(text.ends_with(&format!("\t{}\n", NOW + DAY)), "{text}");
+        let s = UsageStore::load_at(b"a\tapp:x\t1\t1\n", i64::MAX);
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn record_checks_the_prefix_like_load() {
+        let mut s = UsageStore::default();
+        // A query can't carry control characters; build the prefix by hand
+        // through the same check `record` uses.
+        assert!(!key_ok("a\tb", "app:x"));
+        assert!(!key_ok("a\nb", "app:x"));
+        assert!(key_ok("abc", "app:x"));
+        s.record(&q("abcdefghijkl"), "app:x", NOW);
+        assert_eq!(s.len(), 1);
+        // What `record` wrote loads back whole.
+        let back = UsageStore::load_at(&s.to_bytes(), NOW);
+        assert_eq!((back.len(), back.skipped()), (1, 0));
+    }
+
+    #[test]
+    fn debug_is_redacted() {
+        let mut s = UsageStore::default();
+        s.record(&q("secretq"), "app:secret.desktop", NOW);
+        let d = format!("{s:?} {:?}", s.key(&q("secretq")));
+        assert!(!d.contains("secret"), "{d}");
     }
 
     #[test]
@@ -428,7 +537,7 @@ mod tests {
         s.record(&q("fire"), "app:f.desktop", NOW + 5);
         s.record(&q(""), "setting:x", NOW + 10);
         let b = s.to_bytes();
-        let s2 = UsageStore::load(&b);
+        let s2 = UsageStore::load_at(&b, NOW + 10);
         assert_eq!(s2.to_bytes(), b);
         assert_eq!(s2.len(), 3);
         // The prefix is the first 8 folded chars.
@@ -511,9 +620,10 @@ mod tests {
         assert_eq!(back.to_bytes(), s.to_bytes());
         let e = back.by_id["app:x"]["a"];
         assert!((e.frecency(14 * DAY + 28 * DAY) - 0.375).abs() < 1e-9);
-        // A clock going backwards doesn't blow the count up.
+        // A clock going backwards doesn't blow the count up, and `last`
+        // never moves back (it is only cut to now + 1 day).
         s.record(&q("a"), "app:x", 0);
-        assert_eq!(s.to_bytes(), b"a\tapp:x\t2.5\t0\n");
+        assert_eq!(s.to_bytes(), format!("a\tapp:x\t2.5\t{DAY}\n").as_bytes());
     }
 
     #[test]

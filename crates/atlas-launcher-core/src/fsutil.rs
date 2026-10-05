@@ -76,6 +76,25 @@ fn cstr(s: &OsStr) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL byte"))
 }
 
+/// The part of the target's name a temp name keeps: well under NAME_MAX
+/// (255) whatever the target's name is.
+fn temp_stem(name: &[u8]) -> Vec<u8> {
+    name.iter().copied().take(120).collect()
+}
+
+/// Whether `s` is `<digits>-<digits>`, the tail `write_atomic` puts after
+/// `.tmp-`.
+fn is_temp_tail(s: &[u8]) -> bool {
+    let Some(i) = s.iter().position(|&b| b == b'-') else {
+        return false;
+    };
+    let (a, b) = (&s[..i], &s[i + 1..]);
+    !a.is_empty()
+        && !b.is_empty()
+        && a.iter().all(u8::is_ascii_digit)
+        && b.iter().all(u8::is_ascii_digit)
+}
+
 /// Writes `bytes` to `path` so that a crash leaves either the old file or the
 /// new one: a temp file in the same directory (`O_CREAT|O_EXCL`), fsync,
 /// rename over the target, fsync of the directory. An existing target keeps
@@ -116,12 +135,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let existing = unsafe { libc::fstatat(dfd, final_name.as_ptr(), &mut st, 0) } == 0
         && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
     let mode = if existing {
-        (st.st_mode & 0o7777) as u32
+        // Never setuid, setgid or sticky, whatever the old file had.
+        (st.st_mode & 0o777) as u32
     } else {
-        mode
+        mode & 0o777
     };
-    // Keep the temp name well under NAME_MAX (255) whatever the target's is.
-    let stem: Vec<u8> = name.as_bytes().iter().copied().take(120).collect();
+    let stem = temp_stem(name.as_bytes());
     let mut last_err = None;
     for _ in 0..8 {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -145,13 +164,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     Err(last_err.unwrap_or_else(|| io::Error::other("could not create a temp file")))
 }
 
-/// Removes `.{name}.tmp-*` files in `dir` last modified more than
+/// Removes `.{name}.tmp-<pid>-<n>` files in `dir` last modified more than
 /// `older_than` ago: what a crash between creating and renaming a temp file
-/// leaves behind. Only regular files are removed, through the folder's
-/// descriptor (a symlink is never followed). Returns how many were removed;
+/// leaves behind. Only regular files with exactly that name shape are removed
+/// (so `.{name}.tmp-backup` stays), listed and unlinked through the same
+/// folder descriptor (a symlink is never followed). Returns how many were removed;
 /// errors only skip the entry.
 pub fn sweep_stale_temps(dir: &Path, name: &str, older_than: Duration) -> usize {
-    let prefix = format!(".{name}.tmp-");
+    // The prefix is built from the same cut stem `write_atomic` uses.
+    let mut prefix = b".".to_vec();
+    prefix.extend_from_slice(&temp_stem(name.as_bytes()));
+    prefix.extend_from_slice(b".tmp-");
     let Ok(dir_file) = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -160,19 +183,43 @@ pub fn sweep_stale_temps(dir: &Path, name: &str, older_than: Duration) -> usize 
         return 0;
     };
     let dfd = dir_file.as_raw_fd();
-    let Ok(rd) = fs::read_dir(dir) else {
+    // List the directory behind the very descriptor the unlinks use.
+    // SAFETY: `dfd` is a live descriptor; the duplicate is owned by the DIR
+    // below, which closes it (or is closed here when fdopendir fails).
+    let dup = unsafe { libc::fcntl(dfd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
         return 0;
-    };
+    }
+    // SAFETY: `dup` is a valid directory descriptor nobody else uses.
+    let dirp = unsafe { libc::fdopendir(dup) };
+    if dirp.is_null() {
+        // SAFETY: fdopendir failed, so `dup` is still ours to close.
+        unsafe { libc::close(dup) };
+        return 0;
+    }
+    // SAFETY: `dirp` is a valid open DIR.
+    unsafe { libc::rewinddir(dirp) };
     let now = SystemTime::now();
-    let mut removed = 0;
-    for entry in rd.flatten() {
-        let fname = entry.file_name();
-        // Names are cut at 120 bytes of the target's, so match the prefix on
-        // the bytes of the cut name too.
-        if !fname.as_bytes().starts_with(prefix.as_bytes()) {
-            continue;
+    let mut names: Vec<CString> = Vec::new();
+    loop {
+        // SAFETY: `dirp` is valid; the entry is copied before the next call.
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            break;
         }
-        let Ok(c) = cstr(&fname) else { continue };
+        // SAFETY: d_name is a NUL-terminated string inside the entry.
+        let fname = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+        let bytes = fname.to_bytes();
+        if let Some(tail) = bytes.strip_prefix(prefix.as_slice())
+            && is_temp_tail(tail)
+        {
+            names.push(fname.to_owned());
+        }
+    }
+    // SAFETY: `dirp` is valid and closed exactly once (this closes `dup`).
+    unsafe { libc::closedir(dirp) };
+    let mut removed = 0;
+    for c in names {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: valid dir fd, C string and stat buffer; AT_SYMLINK_NOFOLLOW
         // so a link is seen as a link.
@@ -411,5 +458,79 @@ mod tests {
         let p = d.path().join("n".repeat(250));
         write_atomic(&p, b"x", 0o600).unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"x");
+    }
+
+    #[test]
+    fn sweep_needs_the_exact_temp_shape() {
+        let d = tempfile::tempdir().unwrap();
+        let long_ago = SystemTime::now() - Duration::from_secs(7200);
+        let keep_names = [
+            ".usage.tsv.tmp-backup",
+            ".usage.tsv.tmp-",
+            ".usage.tsv.tmp-1",
+            ".usage.tsv.tmp-1-",
+            ".usage.tsv.tmp--1",
+            ".usage.tsv.tmp-1-2-3",
+            ".usage.tsv.tmp-a-2",
+        ];
+        for n in keep_names {
+            let f = d.path().join(n);
+            fs::write(&f, b"x").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&f)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        let gone = d.path().join(".usage.tsv.tmp-12-34");
+        fs::write(&gone, b"x").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&gone)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        assert_eq!(
+            sweep_stale_temps(d.path(), "usage.tsv", Duration::from_secs(3600)),
+            1
+        );
+        assert!(!gone.exists());
+        for n in keep_names {
+            assert!(d.path().join(n).exists(), "{n}");
+        }
+    }
+
+    #[test]
+    fn sweep_finds_temps_of_long_names() {
+        let d = tempfile::tempdir().unwrap();
+        let name = "n".repeat(250);
+        let tmp = d.path().join(format!(".{}.tmp-5-6", "n".repeat(120)));
+        fs::write(&tmp, b"x").unwrap();
+        assert_eq!(
+            sweep_stale_temps(d.path(), &name, Duration::ZERO.max(Duration::from_nanos(1))),
+            1
+        );
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn special_mode_bits_are_never_kept_or_set() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f");
+        fs::write(&p, b"a").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o4755)).unwrap();
+        write_atomic(&p, b"b", 0o600).unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        let n = d.path().join("new");
+        write_atomic(&n, b"b", 0o6600).unwrap();
+        assert_eq!(
+            fs::metadata(&n).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
     }
 }

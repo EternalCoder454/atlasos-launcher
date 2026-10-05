@@ -35,24 +35,30 @@ pub fn is_unsafe_char(c: char) -> bool {
             | '\u{180B}'..='\u{180F}' // Mongolian variation selectors
             | '\u{FE00}'..='\u{FE0F}' // variation selectors
             | '\u{E0000}'..='\u{E007F}' // tags
+            | '\u{E0100}'..='\u{E01EF}' // variation selectors supplement
+            | '\u{2800}' // braille blank
+            | '\u{FFFC}' // object replacement
+            | '\u{1D173}'..='\u{1D17A}' // musical formatting
             | '\u{2028}' | '\u{2029}') // line and paragraph separators
 }
 
 /// Longest absolute icon path, in bytes.
 pub const MAX_ICON_PATH_BYTES: usize = 4096;
 
-/// A theme icon name: `[A-Za-z0-9._-]{1,128}`.
+/// A theme icon name: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`.
 pub fn valid_icon_name(icon: &str) -> bool {
     (1..=128).contains(&icon.len())
+        && icon.as_bytes()[0].is_ascii_alphanumeric()
         && icon
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// An absolute icon path: starts with `/` (so no scheme), at most 4096 bytes,
-/// no `..` segment, no NUL or other control character.
+/// not `//` first, no `..` segment, no NUL or other control character.
 pub fn valid_icon_path(icon: &str) -> bool {
     icon.starts_with('/')
+        && !icon.starts_with("//")
         && icon.len() <= MAX_ICON_PATH_BYTES
         && !icon.chars().any(is_unsafe_char)
         && !icon.split('/').any(|seg| seg == "..")
@@ -149,7 +155,7 @@ const MAX_FUZZY_CHARS: usize = 128;
 
 /// A field prepared once for matching many queries: its folded text, where
 /// each word starts and its acronym.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Prepared {
     pub folded: String,
     /// Characters in `folded`.
@@ -158,6 +164,16 @@ pub struct Prepared {
     word_starts: Vec<usize>,
     /// First letter of each word ("Visual Studio Code" → "vsc").
     acronym: String,
+}
+
+/// Redacted: lengths only, never the text.
+impl fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Prepared")
+            .field("chars", &self.chars)
+            .field("words", &self.word_starts.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Prepared {
@@ -403,6 +419,7 @@ impl Query {
     pub fn new(raw: &str, serial: u64) -> Self {
         let raw: String = raw
             .chars()
+            .map(|c| if c == '\t' { ' ' } else { c })
             .filter(|c| !is_unsafe_char(*c) || *c == ' ')
             .take(MAX_QUERY_CHARS)
             .collect();
@@ -458,6 +475,47 @@ mod tests {
 
     fn m(field: &str, q: &str) -> Option<MatchClass> {
         Prepared::new(field).matches(&Query::new(q, 0))
+    }
+
+    #[test]
+    fn unsafe_chars_extended() {
+        for c in [
+            '\u{2800}',
+            '\u{FFFC}',
+            '\u{E0100}',
+            '\u{E01EF}',
+            '\u{1D173}',
+            '\u{1D17A}',
+        ] {
+            assert!(is_unsafe_char(c), "{c:?}");
+        }
+        assert!(!is_unsafe_char('a'));
+    }
+
+    #[test]
+    fn icon_name_and_path_edges() {
+        assert!(valid_icon_name("firefox"));
+        assert!(valid_icon_name("a-b_c.d"));
+        assert!(!valid_icon_name("-x"));
+        assert!(!valid_icon_name(".hidden"));
+        assert!(!valid_icon_name("_x"));
+        assert!(valid_icon_path("/usr/share/a.png"));
+        assert!(!valid_icon_path("//host/a.png"));
+        assert!(!valid_icon_path("///a.png"));
+    }
+
+    #[test]
+    fn query_tabs_become_spaces() {
+        let q = Query::new("a\tb", 0);
+        assert_eq!(q.raw, "a b");
+        assert_eq!(q.folded, "a b");
+        assert_eq!(Query::new("a\nb", 0).raw, "ab");
+    }
+
+    #[test]
+    fn prepared_debug_is_redacted() {
+        let d = format!("{:?}", Prepared::new("Secret Name"));
+        assert!(!d.contains("ecret") && d.contains("chars"));
     }
 
     #[test]

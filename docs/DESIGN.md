@@ -290,7 +290,9 @@ quality `m`, from strongest to weakest:
   | file or folder | 0.7 |
   | KRunner match | relevance × 0.75 |
 
-  The web row is always last.
+  The web row is always last. A calculation whose input could also be a
+  date or an ID (`2026-10-05`, `1/2/3`) scores a flat 0.5
+  (`calc::AMBIGUOUS_SCORE`), so it sits below the apps it might be.
 - `learned` comes from `usage.tsv`:
   - up to 0.5 for this exact query prefix having led to this result (the
     frecency `Σ 2^(−age/14 d)`, through `0.25·log2(1+f)`);
@@ -428,7 +430,10 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
     IO worker).
   - Only `file:` URLs are kept, with no host but `localhost`, no `.` or `..`
     segments and no NUL; the URI is rebuilt from the checked path.
-  - Dates in the future count as now.
+  - Dates more than a day in the future count as unknown, so forged entries
+    sort last.
+  - The 500 newest entries are kept, then those whose file is gone are
+    dropped, so the list can be shorter than 500.
   - Names are cleaned of control and bidi characters.
   - An entry is shown only if its file exists (checked on the IO worker).
 - **The Settings index:**
@@ -438,12 +443,18 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   - Text is length-capped.
 - **The user's own files** (`launcher.conf`, `pinned.list`, `usage.tsv`):
   read defensively; bad lines are skipped and counted in the log; size caps
-  of 256 KiB each. Written atomically with mode 0600.
+  of 256 KiB each. Written atomically: a new file gets mode 0600, an
+  existing one keeps its permission bits (never setuid, setgid or sticky).
+  Temp files a crash left behind (`.<name>.tmp-<pid>-<n>`) are removed at
+  start; nothing else in the folder is touched.
 - **`usage.tsv` records only ids that carry nothing private:** `app:`,
   `setting:` and `session:` ids. Typed command lines (`run:`, `term:`),
   file paths (`file:`), KRunner match ids, the calculator and the web row
-  are never recorded. Ids read back from it are only compared with live
-  results, never turned into an action.
+  are never recorded. It does keep the first 8 typed characters of each
+  query that ran something, readable only by the user. Ids read back from it
+  are only compared with live results, never turned into an action. A
+  `last-used` time more than a day ahead is clamped, so a clock that went
+  backwards cannot pin an entry at the top.
 - **KRunner plugins:**
   - In-process plugins are trusted as KRunner trusted them; D-Bus runners
     run out of process.
@@ -452,10 +463,13 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   - Their icons pass the same check as any icon (below).
   - Their actions run through `RunnerManager::run`, by the match the
     launcher kept for that id.
+  - At most 200 matches per batch are taken, so a plugin cannot flood the
+    search worker.
 - **Explorer's file results:**
   - Paths must be absolute and normalised, under 4 KiB, with no NUL.
   - The shown name is the path's own file name, not the hit's `name`, and
-    the URI is rebuilt from the path.
+    the URI is rebuilt from the path. The icon comes from the path too.
+  - At most 200 hits per answer are taken.
   - Only `file:` URLs are opened. `OpenUrlJob` runs with a UI delegate and
     never `setRunExecutables(true)`, so KIO's prompts for executables and
     untrusted desktop files still fire.
@@ -466,19 +480,24 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
     `PATH` scan skips relative entries and caps the entries it reads.
   - No shell is used, except "Run in Terminal" with the user's own line.
     Run uses the two-argument `CommandLauncherJob(executable, args)`.
-  - The row shows the line as typed (only control and bidi characters
-    removed), so what is shown is what runs.
-- **Icons:** theme names matching `[A-Za-z0-9._-]{1,128}`, or absolute paths
-  (no scheme, no `..`, at most 4 KiB), loaded by Qt's icon loader. Anything
+  - The row shows the line as typed, so what is shown is what runs. A line
+    holding any whitespace but a plain space, or any invisible character,
+    offers no Run row at all, rather than a row that hides part of what
+    would run. The panel elides a long line in the middle and gives the
+    full line as its tooltip and accessible description.
+- **Icons:** theme names matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, or
+  absolute paths (no scheme, no leading `//`, no `..`, at most 4 KiB),
+  loaded asynchronously through `QUrl::fromLocalFile`. Anything
   else (`https:` and `file:` URLs included) falls back to a generic icon, so
   no icon reaches the network.
 - **Logs:** the journal never gets query text, file names or paths of what
-  the user ran; only timings, counts and error kinds. `Query` and
-  `ResultItem` print redacted under `{:?}`, so a stray debug log cannot leak
-  them.
+  the user ran; only timings, counts and error kinds. Every core type that
+  holds such text (queries, results, actions, runner matches, file hits,
+  recent files, the usage store, calculations, command plans) prints
+  redacted under `{:?}`, so a stray debug log cannot leak it.
 - **Invisible characters:** control, bidi, zero-width, variation selector,
-  tag and filler characters are removed from shown text, so two names
-  cannot look the same while differing.
+  tag, filler, Braille blank and object-replacement characters are removed
+  from shown text, so two names cannot look the same while differing.
 - **Matching cost:** typo-tolerant matching runs on names only and on
   fields of at most 128 characters, so crafted long paths cannot make a
   keystroke slow.
@@ -498,6 +517,7 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 | Settings index missing or invalid | No Settings results; one warning in the log |
 | `usage.tsv`, `pinned.list` or `launcher.conf` corrupt | Bad lines skipped; the file is rewritten on the next change |
 | Disk full or file unwritable | Changes kept in memory, one warning; nothing is lost from the old file (atomic writes) |
+| A recent file is on a hung network mount | Only the IO worker waits on its `stat` (the GUI and search never do); recent files show the last list until it returns. Pin writes queued behind it are delayed, not lost |
 | A pinned app is uninstalled | Hidden, but kept in `pinned.list`, so a reinstall brings it back |
 | A launch fails | A notification with the job's error |
 | A power or session call fails | An inline message in the panel's footer |
