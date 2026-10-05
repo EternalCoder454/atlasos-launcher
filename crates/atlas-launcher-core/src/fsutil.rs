@@ -1,1 +1,286 @@
-//! (being written)
+//! File helpers for the user's own files: capped reads and atomic writes.
+//! Nothing here logs paths (they can carry names the user typed).
+
+use std::ffi::{CString, OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Reads a whole file, but never more than `cap` bytes. `Ok(None)` when it
+/// doesn't exist; `InvalidData` when it is larger than `cap` (decided by
+/// reading at most `cap + 1` bytes, not by trusting the size in the metadata);
+/// anything that isn't a regular file is `InvalidInput`. Follows symlinks.
+pub fn read_capped(path: &Path, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    // O_NONBLOCK so that opening a FIFO put there by mistake can't hang us.
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut buf = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file is larger than the allowed size",
+        ));
+    }
+    Ok(Some(buf))
+}
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Most symlink hops followed before giving up (the kernel's own limit is 40).
+const MAX_LINK_HOPS: usize = 16;
+
+/// Follows `path` while it is a symlink, so a dotfile manager's link is
+/// written through, never replaced. A missing final target is fine (it will
+/// be created where the link points).
+fn resolve_link(path: &Path) -> io::Result<PathBuf> {
+    let mut cur = path.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let target = fs::read_link(&cur)?;
+                cur = if target.is_absolute() {
+                    target
+                } else {
+                    cur.parent().unwrap_or(Path::new(".")).join(target)
+                };
+            }
+            Ok(_) => return Ok(cur),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(cur),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
+fn cstr(s: &OsStr) -> io::Result<CString> {
+    CString::new(s.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL byte"))
+}
+
+/// Writes `bytes` to `path` so that a crash leaves either the old file or the
+/// new one: a temp file in the same directory (`O_CREAT|O_EXCL`, `mode`),
+/// fsync, rename over the target, fsync of the directory. Missing parent
+/// directories are created with mode 0700. A symlink at `path` is written
+/// through. On any error the temp file is removed.
+///
+/// The directory is opened once and the temp file, the rename and the unlink
+/// all go through that descriptor (`openat`, `renameat`, `unlinkat`), so
+/// swapping a path component for a symlink mid-way can't redirect them.
+pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let target = resolve_link(path)?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+        .to_owned();
+    let dir: &Path = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let dir_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(dir)?;
+    let dfd = dir_file.as_raw_fd();
+
+    let final_name = cstr(&name)?;
+    // Keep the temp name well under NAME_MAX (255) whatever the target's is.
+    let stem: Vec<u8> = name.as_bytes().iter().copied().take(120).collect();
+    let mut last_err = None;
+    for _ in 0..8 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut tmp = b".".to_vec();
+        tmp.extend_from_slice(&stem);
+        tmp.extend_from_slice(format!(".tmp-{}-{}", std::process::id(), n).as_bytes());
+        let tmp_name = cstr(&OsString::from_vec(tmp))?;
+        match write_via_temp(dfd, &tmp_name, &final_name, bytes, mode) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last_err = Some(e),
+            Err(e) => return Err(e),
+            Ok(()) => {
+                // Make the rename itself durable.
+                return dir_file.sync_all();
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| io::Error::other("could not create a temp file")))
+}
+
+fn write_via_temp(
+    dfd: RawFd,
+    tmp: &CString,
+    final_name: &CString,
+    bytes: &[u8],
+    mode: u32,
+) -> io::Result<()> {
+    // SAFETY: `dfd` is a live directory descriptor and `tmp` a valid C string.
+    let fd = unsafe {
+        libc::openat(
+            dfd,
+            tmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            mode as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened and nothing else owns it.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let result = (|| {
+        // The umask may have cut the mode at creation; set it exactly.
+        // SAFETY: `file` owns a valid descriptor.
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        // SAFETY: both names are valid C strings relative to `dfd`.
+        if unsafe { libc::renameat(dfd, tmp.as_ptr(), dfd, final_name.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+    drop(file);
+    if result.is_err() {
+        // SAFETY: as above; best effort, the original error is what matters.
+        unsafe { libc::unlinkat(dfd, tmp.as_ptr(), 0) };
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn read_missing_is_none() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(read_capped(&d.path().join("nope"), 10).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_cap_is_exact() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f");
+        fs::write(&p, b"12345").unwrap();
+        assert_eq!(read_capped(&p, 5).unwrap().unwrap(), b"12345");
+        let e = read_capped(&p, 4).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        fs::write(&p, b"").unwrap();
+        assert_eq!(read_capped(&p, 0).unwrap().unwrap(), b"");
+    }
+
+    #[test]
+    fn read_follows_symlink_and_rejects_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f");
+        fs::write(&p, b"x").unwrap();
+        let l = d.path().join("l");
+        symlink(&p, &l).unwrap();
+        assert_eq!(read_capped(&l, 10).unwrap().unwrap(), b"x");
+        let e = read_capped(d.path(), 10).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_creates_dirs_and_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a/b/file");
+        write_atomic(&p, b"hello", 0o600).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"hello");
+        let m = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(m, 0o600);
+        let dm = fs::metadata(d.path().join("a"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dm, 0o700);
+        write_atomic(&p, b"bye", 0o600).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"bye");
+        // No temp files left.
+        let n = fs::read_dir(p.parent().unwrap()).unwrap().count();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn write_goes_through_symlink() {
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join("dots")).unwrap();
+        let real = d.path().join("dots/real");
+        fs::write(&real, b"old").unwrap();
+        let link = d.path().join("link");
+        symlink("dots/real", &link).unwrap();
+        write_atomic(&link, b"new", 0o644).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+        // A dangling link gets its target created.
+        let l2 = d.path().join("l2");
+        symlink("dots/created", &l2).unwrap();
+        write_atomic(&l2, b"c", 0o644).unwrap();
+        assert_eq!(fs::read(d.path().join("dots/created")).unwrap(), b"c");
+    }
+
+    #[test]
+    fn symlink_loop_is_an_error() {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a");
+        let b = d.path().join("b");
+        symlink(&b, &a).unwrap();
+        symlink(&a, &b).unwrap();
+        assert!(write_atomic(&a, b"x", 0o600).is_err());
+    }
+
+    #[test]
+    fn failure_keeps_old_file_and_leaves_no_temp() {
+        let d = tempfile::tempdir().unwrap();
+        // Parent is a file: can't create the directory.
+        let f = d.path().join("plain");
+        fs::write(&f, b"keep").unwrap();
+        assert!(write_atomic(&f.join("child"), b"x", 0o600).is_err());
+        assert_eq!(fs::read(&f).unwrap(), b"keep");
+        // Target is a non-empty directory: rename fails, temp is removed.
+        let t = d.path().join("dir");
+        fs::create_dir(&t).unwrap();
+        fs::write(t.join("inner"), b"i").unwrap();
+        assert!(write_atomic(&t, b"x", 0o600).is_err());
+        assert!(t.join("inner").exists());
+        let names: Vec<_> = fs::read_dir(d.path()).unwrap().collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn long_names_work() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("n".repeat(250));
+        write_atomic(&p, b"x", 0o600).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"x");
+    }
+}
