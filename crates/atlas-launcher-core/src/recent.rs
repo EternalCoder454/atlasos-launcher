@@ -6,12 +6,12 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 
+use crate::fsutil::read_capped;
 use crate::result::{Action, Kind, ResultItem, prior};
 use crate::text::{Prepared, Query, clean_display, score_fields};
 
@@ -23,6 +23,11 @@ pub const MAX_BOOKMARKS: usize = 10_000;
 pub const MAX_DEPTH: usize = 32;
 /// Longest path kept, in bytes.
 pub const MAX_PATH_BYTES: usize = 4096;
+/// Most entries kept (the newest): only these can be shown, and they bound
+/// both the search cost and the stats of `retain_existing`.
+pub const MAX_KEPT: usize = 500;
+/// Most characters of the parent folder used for matching.
+const MAX_PARENT_MATCH_CHARS: usize = 256;
 
 #[derive(Debug)]
 pub enum RecentError {
@@ -349,6 +354,16 @@ pub(crate) fn parent_of(path: &Path) -> &str {
     path.parent().and_then(Path::to_str).unwrap_or("/")
 }
 
+/// The parent folder as matched: its last [`MAX_PARENT_MATCH_CHARS`]
+/// characters (the folders nearest the file).
+fn parent_for_match(path: &Path) -> &str {
+    let p = parent_of(path);
+    match p.char_indices().rev().nth(MAX_PARENT_MATCH_CHARS - 1) {
+        Some((i, _)) => &p[i..],
+        None => p,
+    }
+}
+
 /// `dir` with a leading `home` shown as "~".
 pub(crate) fn tilde(dir: &str, home: &Path) -> String {
     if let Some(h) = home.to_str()
@@ -373,6 +388,15 @@ impl RecentFiles {
     /// keeps what came before and sets `malformed`; only a file over
     /// [`MAX_BYTES`] is refused.
     pub fn parse(bytes: &[u8]) -> Result<RecentFiles, RecentError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        Self::parse_at(bytes, now)
+    }
+
+    /// [`RecentFiles::parse`] with the clock given: dates after `now` count
+    /// as `now`, so a forged future date can't pin an entry to the top.
+    fn parse_at(bytes: &[u8], now: i64) -> Result<RecentFiles, RecentError> {
         if bytes.len() > MAX_BYTES {
             return Err(RecentError::TooLarge);
         }
@@ -429,10 +453,14 @@ impl RecentFiles {
                 }
             }
         }
+        for i in &mut items {
+            i.when = i.when.min(now);
+        }
         // Newest first; the path breaks ties so equal inputs sort alike.
         items.sort_by(|a, b| b.when.cmp(&a.when).then_with(|| a.path.cmp(&b.path)));
         let mut seen = HashSet::with_capacity(items.len());
         items.retain(|i| seen.insert(i.path.clone()));
+        items.truncate(MAX_KEPT);
         let mut r = RecentFiles {
             items,
             malformed,
@@ -445,11 +473,14 @@ impl RecentFiles {
     /// Reads and parses the file at `path`, reading at most the size cap
     /// plus one byte. File IO: call it off the GUI thread.
     pub fn load(path: &Path) -> Result<RecentFiles, RecentError> {
-        let file = std::fs::File::open(path).map_err(RecentError::Io)?;
-        let mut buf = Vec::new();
-        file.take(MAX_BYTES as u64 + 1)
-            .read_to_end(&mut buf)
-            .map_err(RecentError::Io)?;
+        let buf = match read_capped(path, MAX_BYTES as u64) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Err(RecentError::Io(std::io::ErrorKind::NotFound.into())),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(RecentError::TooLarge);
+            }
+            Err(e) => return Err(RecentError::Io(e)),
+        };
         Self::parse(&buf)
     }
 
@@ -457,7 +488,12 @@ impl RecentFiles {
         self.prepared = self
             .items
             .iter()
-            .map(|i| (Prepared::new(&i.name), Prepared::new(parent_of(&i.path))))
+            .map(|i| {
+                (
+                    Prepared::new(&i.name),
+                    Prepared::new(parent_for_match(&i.path)),
+                )
+            })
             .collect();
     }
 
@@ -507,7 +543,7 @@ impl RecentFiles {
                     let (name, parent) = &self.prepared[n];
                     score_fields(q, name, std::slice::from_ref(parent), None)?
                 } else {
-                    let parent = Prepared::new(parent_of(&f.path));
+                    let parent = Prepared::new(parent_for_match(&f.path));
                     score_fields(q, &Prepared::new(&f.name), &[parent], None)?
                 };
                 Some(self.item(f, m, home))
@@ -740,7 +776,7 @@ mod tests {
             .collect();
         let r = p(&format!("<xbel>{many}</xbel>"));
         assert!(r.malformed);
-        assert_eq!(r.items.len(), MAX_BOOKMARKS);
+        assert_eq!(r.items.len(), MAX_KEPT); // MAX_BOOKMARKS read, newest MAX_KEPT kept
     }
 
     #[test]
@@ -795,6 +831,56 @@ mod tests {
         assert_eq!(r.items.len(), 2);
         assert!(r.items.iter().any(|i| i.is_dir));
         assert_eq!(r.search(&q("here"), dir.path()).len(), 1);
+    }
+
+    fn bm(path: &str, date: &str) -> String {
+        format!(r#"<bookmark href="file://{path}" modified="{date}"/>"#)
+    }
+
+    #[test]
+    fn keeps_newest_500_and_clamps_future() {
+        let mut x = String::from("<xbel>");
+        for i in 0..700 {
+            let d = format!("2020-01-01T00:{:02}:{:02}Z", (i / 60) % 60, i % 60);
+            x.push_str(&bm(&format!("/home/u/f{i}"), &d));
+        }
+        x.push_str(&bm("/home/u/future", "2999-01-01T00:00:00Z"));
+        x.push_str("</xbel>");
+        let now = parse_date("2024-01-01T00:00:00Z");
+        let r = RecentFiles::parse_at(x.as_bytes(), now).unwrap();
+        assert_eq!(r.items.len(), MAX_KEPT);
+        assert_eq!(r.items[0].path, PathBuf::from("/home/u/future"));
+        assert!(r.items.iter().all(|i| i.when <= now));
+        // The future entry is clamped to now, which is after every real one.
+        assert_eq!(r.items[0].when, now);
+        assert_eq!(r.items[1].path, PathBuf::from("/home/u/f699"));
+        assert_eq!(r.prepared.len(), MAX_KEPT);
+    }
+
+    #[test]
+    fn parent_match_text_is_capped() {
+        let long = format!("/{}/file", "d".repeat(1000));
+        let p = PathBuf::from(&long);
+        assert_eq!(parent_for_match(&p).chars().count(), MAX_PARENT_MATCH_CHARS);
+        let multi = PathBuf::from(format!("/{}/f", "é".repeat(300)));
+        assert_eq!(
+            parent_for_match(&multi).chars().count(),
+            MAX_PARENT_MATCH_CHARS
+        );
+        assert_eq!(parent_for_match(Path::new("/a/b")), "/a");
+    }
+
+    #[test]
+    fn load_refuses_fifo_and_big_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("big.xbel");
+        std::fs::write(&f, vec![b' '; MAX_BYTES + 1]).unwrap();
+        assert!(matches!(RecentFiles::load(&f), Err(RecentError::TooLarge)));
+        // A directory (like a FIFO) is not a regular file.
+        assert!(matches!(
+            RecentFiles::load(dir.path()),
+            Err(RecentError::Io(_))
+        ));
     }
 
     #[test]

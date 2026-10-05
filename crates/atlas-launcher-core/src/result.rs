@@ -74,7 +74,7 @@ pub enum Action {
 }
 
 /// One row of the result list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ResultItem {
     /// Stable across queries, so learning and the list's diff can follow it:
     /// `app:<desktop id>`, `app:<desktop id>#<action>`, `setting:<link>`,
@@ -92,12 +92,26 @@ pub struct ResultItem {
     pub action: Action,
 }
 
+/// Redacted: titles, ids and payloads can carry file names and typed text,
+/// and must never reach a log.
+impl std::fmt::Debug for ResultItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResultItem")
+            .field("kind", &self.kind)
+            .field("score", &self.score)
+            .field("id_len", &self.id.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ResultItem {
     /// Orders results best first: score, then the shorter title, then
-    /// alphabetically, then the id (so equal inputs always sort alike).
+    /// alphabetically, then the id (so equal inputs always sort alike). The
+    /// web row always comes last.
     pub fn rank_cmp(a: &ResultItem, b: &ResultItem) -> std::cmp::Ordering {
-        b.score
-            .total_cmp(&a.score)
+        (a.kind == Kind::Web)
+            .cmp(&(b.kind == Kind::Web))
+            .then_with(|| b.score.total_cmp(&a.score))
             .then_with(|| a.title.chars().count().cmp(&b.title.chars().count()))
             .then_with(|| a.title.cmp(&b.title))
             .then_with(|| a.id.cmp(&b.id))
@@ -114,5 +128,49 @@ pub fn prior(kind: Kind) -> f32 {
         Kind::File | Kind::Folder => 0.7,
         Kind::Runner => 0.75,
         Kind::Web => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str, kind: Kind, score: f32) -> ResultItem {
+        ResultItem {
+            id: id.into(),
+            kind,
+            title: "Secret Title".into(),
+            subtitle: "secret sub".into(),
+            icon: String::new(),
+            score,
+            action: Action::Copy {
+                text: "secret payload".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn debug_is_redacted() {
+        let d = format!("{:?}", item("file:/home/u/secret", Kind::File, 0.5));
+        assert!(!d.contains("ecret"), "{d}");
+        assert!(
+            d.contains("File") && d.contains("0.5") && d.contains("19"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn web_row_sorts_last() {
+        let mut v = [
+            item("web", Kind::Web, 99.0),
+            item("a", Kind::App, 0.1),
+            item("b", Kind::File, 0.0),
+        ];
+        v.sort_by(ResultItem::rank_cmp);
+        assert_eq!(v[2].kind, Kind::Web);
+        assert_eq!(v[0].id, "a");
+        v.reverse();
+        v.sort_by(ResultItem::rank_cmp);
+        assert_eq!(v[2].id, "web");
     }
 }

@@ -34,6 +34,9 @@ pub struct Calculation {
     pub kind: CalcKind,
     /// The target unit of a conversion.
     pub unit: Option<String>,
+    /// The input looks like a date or an ID ("2024-05-17", "555-1234",
+    /// "12/05/2024") as much as like arithmetic: it ranks below exact names.
+    pub ambiguous: bool,
 }
 
 impl Calculation {
@@ -49,7 +52,11 @@ impl Calculation {
             title: format!("= {text}"),
             subtitle: self.expression.clone(),
             icon: "accessories-calculator".to_string(),
-            score: prior(Kind::Calculator),
+            score: if self.ambiguous {
+                0.5
+            } else {
+                prior(Kind::Calculator)
+            },
             action: Action::Copy { text },
         }
     }
@@ -78,7 +85,28 @@ pub fn evaluate(input: &str, decimal: char) -> Option<Calculation> {
     if has_digit && let Some(c) = convert(s, decimal) {
         return Some(c);
     }
-    math(s, decimal)
+    let mut c = math(s, decimal)?;
+    c.ambiguous = looks_like_date_or_id(s);
+    Some(c)
+}
+
+/// Digits and one kind of separator (`-` or `/`), no spaces, and either two
+/// or more separators, a group with a leading zero, or (for `-`) a group of
+/// three or more digits: "2024-05-17", "555-1234", "12/05/2024", "0800-123".
+/// Not "10-2", "100/4" or "2 - 1".
+fn looks_like_date_or_id(s: &str) -> bool {
+    let sep = if s.contains('-') { '-' } else { '/' };
+    let other = if sep == '-' { '/' } else { '-' };
+    if s.contains(other) || !s.chars().all(|c| c.is_ascii_digit() || c == sep) {
+        return false;
+    }
+    let groups: Vec<&str> = s.split(sep).collect();
+    if groups.len() < 2 || groups.iter().any(|g| g.is_empty()) {
+        return false;
+    }
+    groups.len() > 2
+        || groups.iter().any(|g| g.len() > 1 && g.starts_with('0'))
+        || (sep == '-' && groups.iter().any(|g| g.len() >= 3))
 }
 
 // ---------------------------------------------------------------- numbers
@@ -536,6 +564,7 @@ fn math(s: &str, decimal: char) -> Option<Calculation> {
         display: format_number(value, decimal),
         kind: CalcKind::Math,
         unit: None,
+        ambiguous: false,
     })
 }
 
@@ -921,12 +950,44 @@ fn convert(s: &str, decimal: char) -> Option<Calculation> {
         display: format_number(value, decimal),
         kind: CalcKind::Conversion,
         unit: Some(to.symbol.to_string()),
+        ambiguous: false,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_and_id_like_input_is_ambiguous() {
+        for amb in [
+            "2024-05-17",
+            "555-1234",
+            "12/05/2024",
+            "0800-123",
+            "1-2-3",
+            "05/06",
+        ] {
+            let c = evaluate(amb, '.').unwrap_or_else(|| panic!("{amb}"));
+            assert!(c.ambiguous, "{amb}");
+            assert!((c.to_result().score - 0.5).abs() < 1e-6, "{amb}");
+        }
+        for ok in [
+            "10-2",
+            "100/4",
+            "2 - 1",
+            "2+3",
+            "-5",
+            "5-",
+            "2024 - 05",
+            "3-2-",
+        ] {
+            if let Some(c) = evaluate(ok, '.') {
+                assert!(!c.ambiguous, "{ok}");
+                assert_eq!(c.to_result().score, prior(Kind::Calculator), "{ok}");
+            }
+        }
+    }
 
     fn d(input: &str) -> Option<String> {
         evaluate(input, '.').map(|c| c.display)

@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::result::{Action, Kind, ResultItem, prior};
-use crate::text::{Prepared, Query, clean_display, clean_display_max, fold, score_fields};
+use crate::text::{
+    Prepared, Query, clean_display, clean_display_max, fold, score_fields, valid_icon,
+};
 
 pub const MAX_APPS: usize = 10_000;
 pub const MAX_KEYWORDS: usize = 64;
@@ -15,6 +17,8 @@ const MAX_CATEGORIES: usize = 64;
 const MAX_ID_BYTES: usize = 255;
 /// Desktop actions score a little below the app itself.
 const ACTION_WEIGHT: f32 = 0.9;
+/// Shown for an app whose icon is missing or fails the icon check.
+const FALLBACK_ICON: &str = "application-x-executable";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppActionEntry {
@@ -84,7 +88,11 @@ fn sanitize(mut e: AppEntry) -> Option<AppEntry> {
     }
     e.generic_name = clean_display(&e.generic_name);
     e.comment = clean_display(&e.comment);
-    e.icon = clean_display(&e.icon);
+    // Icons are names or absolute paths: checked, never cleaned (cleaning
+    // would mangle a path).
+    if !valid_icon(&e.icon) {
+        e.icon = FALLBACK_ICON.to_owned();
+    }
     e.exec_name = clean_display_max(&e.exec_name, 255);
     e.keywords = e
         .keywords
@@ -106,7 +114,11 @@ fn sanitize(mut e: AppEntry) -> Option<AppEntry> {
         .filter(|a| valid_action_id(&a.id))
         .map(|a| AppActionEntry {
             name: clean_display(&a.name),
-            icon: clean_display(&a.icon),
+            icon: if valid_icon(&a.icon) {
+                a.icon
+            } else {
+                String::new()
+            },
             id: a.id,
         })
         .filter(|a| !a.name.is_empty())
@@ -128,25 +140,36 @@ struct Prep {
 pub struct Catalog {
     /// In A–Z order: non-letters ("#") first, then by folded name, then id.
     apps: Vec<AppEntry>,
+    /// Entries dropped (invalid, duplicate or over the cap).
+    skipped: usize,
     prep: Vec<Prep>,
     by_id: HashMap<String, usize>,
     /// The letter groups, as ranges of `apps`.
     groups: Vec<(char, Range<usize>)>,
 }
 
-/// The A–Z group of a name: its first letter in upper case, `#` for anything
-/// else (digits, symbols).
+/// The A–Z group of a name: its first letter in upper case when that is a
+/// Latin letter (after folding, so "É" is E and "ß" is S), `#` for anything
+/// else: digits, symbols and other scripts.
 fn letter_of(name: &str) -> char {
     match fold(name).chars().next() {
-        Some(c) if c.is_alphabetic() => c.to_uppercase().next().unwrap_or(c),
+        Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase(),
+        Some('ß') => 'S',
+        Some('æ') => 'A',
+        Some('ø' | 'œ') => 'O',
+        Some('đ' | 'ð') => 'D',
+        Some('ł') => 'L',
+        Some('ħ') => 'H',
+        Some('ı') => 'I',
         _ => '#',
     }
 }
 
 impl Catalog {
     pub fn new(entries: Vec<AppEntry>) -> Catalog {
+        let total = entries.len();
         let mut seen = HashMap::new();
-        let mut apps: Vec<(bool, String, AppEntry)> = Vec::new();
+        let mut apps: Vec<(char, String, AppEntry)> = Vec::new();
         for e in entries {
             if apps.len() >= MAX_APPS {
                 break;
@@ -157,9 +180,9 @@ impl Catalog {
             let Some(e) = sanitize(e) else { continue };
             seen.insert(e.desktop_id.clone(), ());
             let folded = fold(&e.name);
-            let is_letter = letter_of(&e.name) != '#';
-            apps.push((is_letter, folded, e));
+            apps.push((letter_of(&e.name), folded, e));
         }
+        // '#' sorts before 'A', and each letter's apps stay contiguous.
         apps.sort_by(|a, b| (a.0, &a.1, &a.2.desktop_id).cmp(&(b.0, &b.1, &b.2.desktop_id)));
         let apps: Vec<AppEntry> = apps.into_iter().map(|t| t.2).collect();
 
@@ -191,6 +214,7 @@ impl Catalog {
             }
         }
         Catalog {
+            skipped: total - apps.len(),
             apps,
             prep,
             by_id,
@@ -200,6 +224,12 @@ impl Catalog {
 
     pub fn len(&self) -> usize {
         self.apps.len()
+    }
+
+    /// How many entries were dropped (invalid, duplicate or over the cap),
+    /// for the caller's log.
+    pub fn skipped(&self) -> usize {
+        self.skipped
     }
 
     pub fn is_empty(&self) -> bool {
@@ -222,11 +252,7 @@ impl Catalog {
 
     /// The apps under one letter ('#' for non-letters), in order.
     pub fn apps_for_letter(&self, letter: char) -> &[AppEntry] {
-        let l = if letter.is_alphabetic() {
-            letter.to_uppercase().next().unwrap_or(letter)
-        } else {
-            '#'
-        };
+        let l = letter_of(letter.encode_utf8(&mut [0; 4]));
         self.groups
             .iter()
             .find(|g| g.0 == l)
@@ -403,11 +429,43 @@ mod tests {
     }
 
     #[test]
+    fn icons_are_checked_not_cleaned() {
+        let mut a = app("a.desktop", "A");
+        a.icon = "/usr/share/icons/a b/x.svg".into();
+        a.actions = vec![
+            AppActionEntry {
+                id: "p".into(),
+                name: "P".into(),
+                icon: "/usr/share/x.png".into(),
+            },
+            AppActionEntry {
+                id: "q".into(),
+                name: "Q".into(),
+                icon: "data:image/png;base64,AA".into(),
+            },
+        ];
+        let mut b = app("b.desktop", "B");
+        b.icon = "../../etc/passwd".into();
+        let mut c = app("c.desktop", "C");
+        c.icon = String::new();
+        let cat = Catalog::new(vec![a, b, c, app("bad", "X")]);
+        let a = cat.get("a.desktop").unwrap();
+        assert_eq!(a.icon, "/usr/share/icons/a b/x.svg");
+        assert_eq!(a.actions[0].icon, "/usr/share/x.png");
+        assert_eq!(a.actions[1].icon, "");
+        assert_eq!(cat.get("b.desktop").unwrap().icon, FALLBACK_ICON);
+        assert_eq!(cat.get("c.desktop").unwrap().icon, FALLBACK_ICON);
+        assert_eq!(cat.skipped(), 1);
+    }
+
+    #[test]
     fn caps_app_count() {
         let v: Vec<_> = (0..MAX_APPS + 50)
             .map(|i| app(&format!("a{i}.desktop"), &format!("App {i}")))
             .collect();
-        assert_eq!(Catalog::new(v).len(), MAX_APPS);
+        let c = Catalog::new(v);
+        assert_eq!(c.len(), MAX_APPS);
+        assert_eq!(c.skipped(), 50);
     }
 
     #[test]
@@ -497,6 +555,27 @@ mod tests {
     }
 
     #[test]
+    fn latin_letters_group_under_base_letter() {
+        let c = Catalog::new(vec![
+            app("a.desktop", "\u{df}tuff"),
+            app("b.desktop", "Sun"),
+            app("c.desktop", "\u{d8}rsted"),
+            app("d.desktop", "Opera"),
+            app("e.desktop", "\u{416}uk"),
+            app("f.desktop", "\u{65e5}\u{672c}"),
+            app("g.desktop", "3D Tool"),
+            app("h.desktop", "Zed"),
+            app("i.desktop", "e\u{301}cran"),
+        ]);
+        assert_eq!(c.letters(), vec!['#', 'E', 'O', 'S', 'Z']);
+        assert_eq!(c.apps_for_letter('#').len(), 3);
+        assert_eq!(c.apps_for_letter('S').len(), 2);
+        assert_eq!(c.apps_for_letter('O').len(), 2);
+        assert_eq!(c.apps_for_letter('\u{c9}').len(), 1);
+        assert!(c.apps_for_letter('\u{416}').len() == 3); // not a letter group: '#'
+    }
+
+    #[test]
     fn recently_installed_orders_and_limits() {
         let mk = |id: &str, t: i64| AppEntry {
             installed_unix: t,
@@ -525,8 +604,7 @@ mod tests {
         assert!(search(&c, "x").is_empty());
     }
 
-    #[test]
-    fn search_of_1000_apps_is_fast() {
+    fn apps_1000() -> Catalog {
         let v: Vec<_> = (0..1000)
             .map(|i| AppEntry {
                 generic_name: format!("Tool number {i}"),
@@ -539,16 +617,53 @@ mod tests {
                 )
             })
             .collect();
-        let c = Catalog::new(v);
-        let q = Query::new("sample app 5", 1);
-        let _ = c.search(&q);
-        let t = Instant::now();
-        let n = 20;
-        for _ in 0..n {
-            std::hint::black_box(c.search(&q));
+        Catalog::new(v)
+    }
+
+    #[test]
+    fn search_of_1000_apps_is_fast() {
+        let c = apps_1000();
+        for text in ["sample app 5", "zqxv"] {
+            let q = Query::new(text, 1);
+            let _ = c.search(&q);
+            let t = Instant::now();
+            let n = 20;
+            for _ in 0..n {
+                std::hint::black_box(c.search(&q));
+            }
+            let per = t.elapsed() / n;
+            println!("search {text:?} over 1000 apps: {per:?}");
+            assert!(per.as_millis() < 20, "{text}: {per:?}");
         }
-        let per = t.elapsed() / n;
-        println!("search over 1000 apps: {per:?}");
-        assert!(per.as_millis() < 20, "{per:?}");
+        assert!(search(&c, "zqxv").is_empty());
+    }
+
+    /// `cargo test --release -p atlas-launcher-core -- --ignored --nocapture bench`
+    #[test]
+    #[ignore = "benchmark: run in release mode"]
+    fn bench_instant_1000_apps() {
+        let c = apps_1000();
+        for text in [
+            "s",
+            "sa",
+            "samp",
+            "sample app 5",
+            "tool99",
+            "zqxv",
+            "smpl",
+            "does thing",
+        ] {
+            let q = Query::new(text, 1);
+            for _ in 0..50 {
+                std::hint::black_box(c.search(&q));
+            }
+            let n = 500;
+            let t = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(c.search(&q));
+            }
+            let us = t.elapsed().as_secs_f64() * 1e6 / f64::from(n);
+            println!("bench {text:?}: {us:.1} us per query over 1000 apps");
+        }
     }
 }

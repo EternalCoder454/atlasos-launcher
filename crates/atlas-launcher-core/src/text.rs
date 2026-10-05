@@ -2,6 +2,8 @@
 //! untrusted text for display, and the match quality of a query against a
 //! name (docs/DESIGN.md, "Search").
 
+use std::fmt;
+
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
@@ -25,7 +27,44 @@ pub fn is_unsafe_char(c: char) -> bool {
             '\u{200B}'..='\u{200F}' // zero-width and LRM/RLM
             | '\u{202A}'..='\u{202E}' // embeddings and overrides
             | '\u{2060}'..='\u{2069}' // word joiner, isolates
-            | '\u{FEFF}' | '\u{061C}' | '\u{FFF9}'..='\u{FFFB}')
+            | '\u{FEFF}' | '\u{061C}' | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{00AD}' // soft hyphen
+            | '\u{034F}' // combining grapheme joiner
+            | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}' // Hangul fillers
+            | '\u{17B4}'..='\u{17B5}' // Khmer inherent vowels
+            | '\u{180B}'..='\u{180F}' // Mongolian variation selectors
+            | '\u{FE00}'..='\u{FE0F}' // variation selectors
+            | '\u{E0000}'..='\u{E007F}' // tags
+            | '\u{2028}' | '\u{2029}') // line and paragraph separators
+}
+
+/// Longest absolute icon path, in bytes.
+pub const MAX_ICON_PATH_BYTES: usize = 4096;
+
+/// A theme icon name: `[A-Za-z0-9._-]{1,128}`.
+pub fn valid_icon_name(icon: &str) -> bool {
+    (1..=128).contains(&icon.len())
+        && icon
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// An absolute icon path: starts with `/` (so no scheme), at most 4096 bytes,
+/// no `..` segment, no NUL or other control character.
+pub fn valid_icon_path(icon: &str) -> bool {
+    icon.starts_with('/')
+        && icon.len() <= MAX_ICON_PATH_BYTES
+        && !icon.chars().any(is_unsafe_char)
+        && !icon.split('/').any(|seg| seg == "..")
+}
+
+/// A theme icon name or an absolute path.
+pub fn valid_icon(icon: &str) -> bool {
+    valid_icon_name(icon) || valid_icon_path(icon)
+}
+
+fn is_sep(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '-' | '_' | '.' | '/' | '(' | ')' | ',' | ':' | '+')
 }
 
 /// Untrusted text made safe to show: control and bidi characters become
@@ -94,11 +133,27 @@ impl MatchClass {
     }
 }
 
+/// How far [`Prepared::match_depth`] looks, cheapest first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Depth {
+    /// Exact, prefix and word prefix.
+    Words,
+    /// Plus acronym and substring.
+    Strict,
+    /// Plus typo-tolerant matching.
+    Fuzzy,
+}
+
+/// Fuzzy matching runs only on names of at most this many characters.
+const MAX_FUZZY_CHARS: usize = 128;
+
 /// A field prepared once for matching many queries: its folded text, where
 /// each word starts and its acronym.
 #[derive(Clone, Debug, Default)]
 pub struct Prepared {
     pub folded: String,
+    /// Characters in `folded`.
+    chars: usize,
     /// Byte offsets into `folded` where words start.
     word_starts: Vec<usize>,
     /// First letter of each word ("Visual Studio Code" → "vsc").
@@ -108,41 +163,46 @@ pub struct Prepared {
 impl Prepared {
     pub fn new(text: &str) -> Self {
         // Word starts come from the original text (camelCase needs its case),
-        // so fold word by word.
+        // so fold char by char. Combining marks fold to nothing and are
+        // invisible to the word logic ("e\u{301}cran" is one word).
         let mut folded = String::with_capacity(text.len());
         let mut word_starts = Vec::new();
         let mut acronym = String::new();
         let mut prev: Option<char> = None;
         for c in text.chars() {
-            let sep = c.is_whitespace()
-                || matches!(c, '-' | '_' | '.' | '/' | '(' | ')' | ',' | ':' | '+');
-            let starts_word = !sep
+            if is_combining_mark(c) {
+                continue;
+            }
+            let starts_word = !is_sep(c)
                 && match prev {
                     None => true,
                     Some(p) => {
-                        let p_sep = p.is_whitespace()
-                            || matches!(p, '-' | '_' | '.' | '/' | '(' | ')' | ',' | ':' | '+');
-                        p_sep
+                        is_sep(p)
                             || (p.is_lowercase() && c.is_uppercase())
-                            || (p.is_alphabetic() != c.is_alphabetic() && !p_sep)
+                            || p.is_alphabetic() != c.is_alphabetic()
                     }
                 };
             let start = folded.len();
-            let f = fold(c.encode_utf8(&mut [0; 4]));
-            if starts_word && !f.is_empty() {
-                word_starts.push(start);
-                acronym.push_str(
-                    f.chars()
-                        .next()
-                        .map(|c| c.to_string())
-                        .as_deref()
-                        .unwrap_or(""),
-                );
+            let mut one = [0; 4];
+            let mut first = None;
+            for f in c
+                .encode_utf8(&mut one)
+                .chars()
+                .nfkd()
+                .filter(|c| !is_combining_mark(*c))
+                .flat_map(char::to_lowercase)
+            {
+                first.get_or_insert(f);
+                folded.push(f);
             }
-            folded.push_str(&f);
+            if starts_word && let Some(f) = first {
+                word_starts.push(start);
+                acronym.push(f);
+            }
             prev = Some(c);
         }
         Prepared {
+            chars: folded.chars().count(),
             folded,
             word_starts,
             acronym,
@@ -156,19 +216,31 @@ impl Prepared {
     fn words(&self) -> impl Iterator<Item = &str> {
         self.word_starts.iter().map(move |&s| {
             let rest = &self.folded[s..];
-            let end = rest
-                .find(|c: char| {
-                    c.is_whitespace()
-                        || matches!(c, '-' | '_' | '.' | '/' | '(' | ')' | ',' | ':' | '+')
-                })
-                .unwrap_or(rest.len());
+            let end = rest.find(is_sep).unwrap_or(rest.len());
             &rest[..end]
         })
     }
 
-    /// The best match of a folded query, or None. Multi-word queries match
-    /// as a word prefix when every query word starts some word of the field.
+    /// The best match of a folded query, or None, with typo tolerance. Use
+    /// it on names only; other fields use [`Prepared::matches_strict`].
     pub fn matches(&self, query: &Query) -> Option<MatchClass> {
+        self.match_depth(query, Depth::Fuzzy)
+    }
+
+    /// Like [`Prepared::matches`] but never fuzzy: exact, prefix, word prefix,
+    /// acronym or substring.
+    pub fn matches_strict(&self, query: &Query) -> Option<MatchClass> {
+        self.match_depth(query, Depth::Strict)
+    }
+
+    /// Exact, prefix or word prefix only (the cheapest check).
+    fn matches_words(&self, query: &Query) -> Option<MatchClass> {
+        self.match_depth(query, Depth::Words)
+    }
+
+    /// Multi-word queries match as a word prefix when every query word
+    /// starts some word of the field.
+    fn match_depth(&self, query: &Query, depth: Depth) -> Option<MatchClass> {
         let q = query.folded.as_str();
         if q.is_empty() || self.folded.is_empty() {
             return None;
@@ -190,14 +262,27 @@ impl Prepared {
         } else if self.words().skip(1).any(|w| w.starts_with(q)) {
             return Some(MatchClass::WordPrefix);
         }
-        let compact: String = q.chars().filter(|c| !c.is_whitespace()).collect();
-        if compact.chars().count() >= 2 && self.acronym.starts_with(&compact) {
+        if depth == Depth::Words {
+            return None;
+        }
+        let compact: std::borrow::Cow<'_, str> = if query.words.len() > 1 {
+            q.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .into()
+        } else {
+            q.into()
+        };
+        if compact.chars().count() >= 2 && self.acronym.starts_with(&*compact) {
             return Some(MatchClass::Acronym);
         }
         if self.folded.contains(q) {
             return Some(MatchClass::Substring);
         }
-        self.fuzzy(&compact)
+        if depth == Depth::Fuzzy && self.chars <= MAX_FUZZY_CHARS {
+            return self.fuzzy(&compact);
+        }
+        None
     }
 
     /// Typo-tolerant matching for queries of 3 or more characters: either one
@@ -205,48 +290,52 @@ impl Prepared {
     /// word prefix, or the query's letters in order starting at a word start,
     /// scored by how tightly they sit.
     fn fuzzy(&self, q: &str) -> Option<MatchClass> {
-        let qc: Vec<char> = q.chars().collect();
+        if q.len() < 3 {
+            return None;
+        }
+        let qc: Vec<char> = q.chars().take(MAX_QUERY_CHARS).collect();
         if qc.len() < 3 {
             return None;
         }
         if qc.len() >= 4 {
+            let mut wc: Vec<char> = Vec::with_capacity(qc.len() + 1);
             for w in self.words() {
-                let wc: Vec<char> = w.chars().collect();
-                for len in [qc.len().saturating_sub(1), qc.len(), qc.len() + 1] {
-                    if len == 0 || len > wc.len() {
-                        continue;
-                    }
-                    if damerau_at_most_one(&qc, &wc[..len]) {
+                wc.clear();
+                wc.extend(w.chars().take(qc.len() + 1));
+                for len in [qc.len() - 1, qc.len(), qc.len() + 1] {
+                    if len <= wc.len() && damerau_at_most_one(&qc, &wc[..len]) {
                         return Some(MatchClass::Fuzzy(0.48));
                     }
                 }
             }
         }
         // Subsequence from a word start: score by span.
-        let fc: Vec<char> = self.folded.chars().collect();
-        let starts: Vec<usize> = self
-            .word_starts
-            .iter()
-            .map(|&b| self.folded[..b].chars().count())
-            .collect();
         let mut best: Option<usize> = None;
-        for &s in &starts {
-            if fc.get(s) != Some(&qc[0]) {
+        for &s in &self.word_starts {
+            let tail = &self.folded[s..];
+            if !tail.starts_with(qc[0]) {
                 continue;
             }
-            let mut i = s;
+            let mut it = tail.chars();
+            let mut span = 0;
             let mut ok = true;
-            for &c in &qc {
-                match fc[i..].iter().position(|&x| x == c) {
-                    Some(p) => i += p + 1,
-                    None => {
-                        ok = false;
-                        break;
+            'q: for &c in &qc {
+                loop {
+                    match it.next() {
+                        Some(x) => {
+                            span += 1;
+                            if x == c {
+                                continue 'q;
+                            }
+                        }
+                        None => {
+                            ok = false;
+                            break 'q;
+                        }
                     }
                 }
             }
             if ok {
-                let span = i - s;
                 best = Some(best.map_or(span, |b| b.min(span)));
             }
         }
@@ -286,7 +375,7 @@ fn damerau_at_most_one(a: &[char], b: &[char]) -> bool {
 pub const MAX_QUERY_CHARS: usize = 256;
 
 /// One query, folded once for every provider.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Query {
     /// What the user typed, cleaned (control and bidi characters removed,
     /// at most [`MAX_QUERY_CHARS`]), not trimmed.
@@ -298,6 +387,16 @@ pub struct Query {
     /// Increases with every keystroke; results carry it so stale ones are
     /// dropped.
     pub serial: u64,
+}
+
+/// Redacted: what the user typed never reaches a log.
+impl fmt::Debug for Query {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Query")
+            .field("serial", &self.serial)
+            .field("chars", &self.raw.chars().count())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Query {
@@ -332,7 +431,7 @@ pub fn score_fields(
 ) -> Option<f32> {
     let mut best = name.matches(q).map(MatchClass::quality);
     for s in secondary {
-        let m = match s.matches(q) {
+        let m = match s.matches_strict(q) {
             Some(MatchClass::Exact) => 0.7,
             Some(MatchClass::Prefix | MatchClass::WordPrefix) => 0.65,
             Some(MatchClass::Acronym) => 0.5,
@@ -344,7 +443,7 @@ pub fn score_fields(
     if let Some(d) = description
         && q.folded.chars().count() >= 3
         && matches!(
-            d.matches(q),
+            d.matches_words(q),
             Some(MatchClass::Exact | MatchClass::Prefix | MatchClass::WordPrefix)
         )
     {
@@ -431,6 +530,91 @@ mod tests {
         assert_eq!(q.serial, 3);
         let long = "a".repeat(1000);
         assert_eq!(Query::new(&long, 0).raw.chars().count(), MAX_QUERY_CHARS);
+    }
+
+    #[test]
+    fn combining_marks_make_no_word_start() {
+        let p = Prepared::new("e\u{301}cran");
+        assert_eq!(p.folded, "ecran");
+        assert_eq!(p.word_starts, vec![0]);
+        assert_eq!(p.acronym, "e");
+        let p = Prepared::new("Cafe\u{301} Noir");
+        assert_eq!(p.word_starts.len(), 2);
+        assert_eq!(m("e\u{301}cran", "cran"), Some(MatchClass::Substring));
+    }
+
+    #[test]
+    fn strict_has_no_fuzzy_and_fuzzy_is_name_only() {
+        let q = Query::new("frefox", 0);
+        let p = Prepared::new("Firefox");
+        assert!(matches!(p.matches(&q), Some(MatchClass::Fuzzy(_))));
+        assert_eq!(p.matches_strict(&q), None);
+        // A secondary field or description never matches by typo.
+        assert_eq!(
+            score_fields(
+                &q,
+                &Prepared::new("Other"),
+                std::slice::from_ref(&p),
+                Some(&p)
+            ),
+            None
+        );
+        // A name longer than 128 characters is not fuzzy-matched.
+        let long = Prepared::new(&format!("{} firefox", "a".repeat(130)));
+        assert_eq!(long.matches(&q), None);
+        let short = Prepared::new(&format!("{} firefox", "a".repeat(100)));
+        assert!(short.matches(&q).is_some());
+    }
+
+    #[test]
+    fn unsafe_chars_are_stripped() {
+        for c in [
+            '\u{AD}',
+            '\u{34F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{17B4}',
+            '\u{17B5}',
+            '\u{180B}',
+            '\u{180F}',
+            '\u{3164}',
+            '\u{FFA0}',
+            '\u{FE00}',
+            '\u{FE0F}',
+            '\u{E0000}',
+            '\u{E007F}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202E}',
+            '\u{7}',
+        ] {
+            assert!(is_unsafe_char(c), "{c:?}");
+            assert_eq!(clean_display(&format!("a{c}b")), "a b", "{c:?}");
+        }
+        assert!(!is_unsafe_char('a') && !is_unsafe_char('é'));
+    }
+
+    #[test]
+    fn icon_checks() {
+        assert!(valid_icon_name("folder-open.v2_x"));
+        assert!(!valid_icon_name("") && !valid_icon_name("a b") && !valid_icon_name("../x"));
+        assert!(!valid_icon_name(&"a".repeat(129)));
+        assert!(valid_icon_path("/usr/share/icons/x.svg"));
+        assert!(!valid_icon_path("usr/x") && !valid_icon_path("/a/../b"));
+        assert!(!valid_icon_path("/a\0b") && !valid_icon_path("file:///x"));
+        assert!(!valid_icon_path(&format!(
+            "/{}",
+            "a".repeat(MAX_ICON_PATH_BYTES)
+        )));
+        assert!(valid_icon("x") && valid_icon("/x") && !valid_icon("data:image/png"));
+    }
+
+    #[test]
+    fn query_debug_is_redacted() {
+        let q = Query::new("secret words", 7);
+        let d = format!("{q:?}");
+        assert!(!d.contains("secret"), "{d}");
+        assert!(d.contains('7') && d.contains("12"), "{d}");
     }
 
     #[test]

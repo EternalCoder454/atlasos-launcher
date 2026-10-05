@@ -87,8 +87,9 @@ pub struct Context<'a> {
 fn rank(items: &mut Vec<ResultItem>, cx: &Context) {
     items.retain(|it| it.kind != Kind::Web);
     if cx.opts.learn {
+        let key = cx.usage.key(cx.query);
         for it in items.iter_mut() {
-            it.score += cx.usage.boost(cx.query, &it.id, cx.now);
+            it.score += cx.usage.boost(&key, &it.id, cx.now);
         }
     }
     items.sort_by(ResultItem::rank_cmp);

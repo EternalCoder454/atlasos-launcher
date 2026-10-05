@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::recent::{RecentFile, file_uri, href_to_path, icon_for, parent_of, tilde, valid_mime};
 use crate::result::{Action, Kind, ResultItem, prior};
-use crate::settings_index::valid_icon;
-use crate::text::{clean_display, clean_display_max, is_unsafe_char};
+use crate::text::{clean_display, clean_display_max, is_unsafe_char, valid_icon};
 
 /// Longest runner id (a plugin id such as `krunner_bookmarksrunner`).
 pub const MAX_RUNNER_ID_BYTES: usize = 128;
@@ -16,8 +15,7 @@ pub const MAX_MATCH_ID_BYTES: usize = 1024;
 /// Shown text caps.
 pub const MAX_TITLE_CHARS: usize = 256;
 pub const MAX_SUBTITLE_CHARS: usize = 512;
-/// Longest absolute icon path a plugin may give.
-pub const MAX_ICON_PATH_BYTES: usize = 4096;
+pub use crate::text::MAX_ICON_PATH_BYTES;
 
 const RUNNER_FALLBACK_ICON: &str = "application-x-executable";
 
@@ -68,13 +66,6 @@ fn valid_match_id(id: &str) -> bool {
         && !id.chars().any(|c| c.is_control() || is_unsafe_char(c))
 }
 
-fn valid_icon_path(icon: &str) -> bool {
-    icon.starts_with('/')
-        && icon.len() <= MAX_ICON_PATH_BYTES
-        && !icon.contains('\0')
-        && !icon.split('/').any(|seg| seg == "..")
-}
-
 /// A KRunner match as a result row, or None when it fails a check.
 /// Score = relevance × the runner prior.
 pub fn runner_item(m: RunnerMatch) -> Option<ResultItem> {
@@ -85,7 +76,7 @@ pub fn runner_item(m: RunnerMatch) -> Option<ResultItem> {
     if title.is_empty() {
         return None;
     }
-    let icon = if valid_icon(&m.icon) || valid_icon_path(&m.icon) {
+    let icon = if valid_icon(&m.icon) {
         m.icon
     } else {
         RUNNER_FALLBACK_ICON.to_owned()

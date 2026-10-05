@@ -115,9 +115,10 @@ with no C++ in the shell:
 - On first load it hands the old launcher's favourites to `ImportPins(as)`.
   The coordinator's update script copies them into the button's
   `ImportPins` config key. The button sends them once, then clears the key.
-- It calls D-Bus through `org.kde.plasma.workspace.dbus`. The F phase checks
-  that this module exists in Plasma 6.7. If it doesn't, the fallback is a
-  tiny QML plugin in the RPM.
+- It calls D-Bus through `org.kde.plasma.workspace.dbus` (in Plasma 6.7:
+  `DBusConnection.asyncCall` with typed arguments, and `DBusProperties` for
+  `Visible`). The module has no struct type, so the button sends `anchor` as
+  an array of four ints, which the launcher accepts beside `(iiii)`.
 
 Without a dock anchor (no dock, or before the button loads), Start mode opens
 at the bottom centre of the active screen. Layer-shell keeps it clear of any
@@ -310,9 +311,11 @@ Enter running the wrong thing
 - The model updates by diff (insert, remove, move), never by reset, so the
   selection and the screen reader's place survive.
 
-**Learning.** Running a result records (the query's first 1–8 characters,
-the result id) in `usage.tsv`, on the worker, atomically (temp file and
-rename). Nothing is recorded when `LearnFromUse=false`. Clear it from
+**Learning.** Running an app, a Settings page or a session command records
+(the query's first 1–8 characters, the result id) in `usage.tsv`, on the
+worker, atomically (temp file and rename, mode 0600). Commands, files,
+KRunner matches, the calculator and the web row are not recorded (see
+"Trust"). Nothing is recorded when `LearnFromUse=false`. Clear it from
 Settings' "Launcher & Search" page (`ClearHistory`) or by deleting the file.
 
 **Calculator and units** are in the core, with no network:
@@ -407,47 +410,78 @@ so stale ones are dropped.
 
 The launcher runs as the user with no privilege: no setuid, no polkit action
 of its own, no root helper. Power and session go through logind and
-ksmserver, under their own policies. There are no secrets. What it reads,
-and how:
+ksmserver, under their own policies. It holds no secrets, and it does not
+record what could carry one (see `usage.tsv` below). What it reads, and how:
 
 - **D-Bus methods (any session process):**
-  - They can open or hide the panel and type a query, capped at 1 KiB with
-    control and bidi characters stripped; they never run anything.
+  - They can open or hide the panel and type a query, capped at 256
+    characters with control and bidi characters stripped; they never run
+    anything. For 300 ms after a D-Bus `Show` that typed a query, Enter is
+    ignored, so another process cannot time a query under the user's Enter.
   - `ImportPins` takes at most 64 ids. Each must match
     `[A-Za-z0-9._-]{1,255}.desktop` or a `preferred://` name and resolve to
     an installed app, and is used only when no `pinned.list` exists.
   - `ClearHistory` deletes only the launcher's own file.
 - **`recently-used.xbel`:** any app can write it.
-  - Size cap 4 MiB, an element cap and XML depth limits.
-  - Only `file:` URLs are kept.
+  - Size cap 4 MiB, an element cap and XML depth limits; read with
+    `O_NONBLOCK` and only if it is a regular file (a FIFO cannot stall the
+    IO worker).
+  - Only `file:` URLs are kept, with no host but `localhost`, no `.` or `..`
+    segments and no NUL; the URI is rebuilt from the checked path.
+  - Dates in the future count as now.
   - Names are cleaned of control and bidi characters.
   - An entry is shown only if its file exists (checked on the IO worker).
 - **The Settings index:**
   - Size cap 2 MiB.
-  - Links must match `[a-z0-9-]+(/[a-z0-9-]+)*`, at most 128 bytes, and are
-    only passed back to Settings.
+  - Links must match `[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*` (no segment
+    starts with `-`), at most 128 bytes, and are only passed back to Settings.
   - Text is length-capped.
 - **The user's own files** (`launcher.conf`, `pinned.list`, `usage.tsv`):
-  read defensively; bad lines are skipped and logged; size caps of 256 KiB
-  each.
+  read defensively; bad lines are skipped and counted in the log; size caps
+  of 256 KiB each. Written atomically with mode 0600.
+- **`usage.tsv` records only ids that carry nothing private:** `app:`,
+  `setting:` and `session:` ids. Typed command lines (`run:`, `term:`),
+  file paths (`file:`), KRunner match ids, the calculator and the web row
+  are never recorded. Ids read back from it are only compared with live
+  results, never turned into an action.
 - **KRunner plugins:**
   - In-process plugins are trusted as KRunner trusted them; D-Bus runners
     run out of process.
-  - Their text is shown as plain text.
-  - Their actions run through `RunnerManager::run`.
+  - Their text is shown as plain text, capped and cleaned; runner ids must
+    match `[A-Za-z0-9._-]{1,128}` and match ids carry no control characters.
+  - Their icons pass the same check as any icon (below).
+  - Their actions run through `RunnerManager::run`, by the match the
+    launcher kept for that id.
 - **Explorer's file results:**
   - Paths must be absolute and normalised, under 4 KiB, with no NUL.
-  - Names are cleaned.
-  - Only `file:` URLs are opened.
+  - The shown name is the path's own file name, not the hit's `name`, and
+    the URI is rebuilt from the path.
+  - Only `file:` URLs are opened. `OpenUrlJob` runs with a UI delegate and
+    never `setRunExecutables(true)`, so KIO's prompts for executables and
+    untrusted desktop files still fire.
 - **Displayed text:** every `Text`/`Label` that shows app, file, plugin or
   query text sets `textFormat: Text.PlainText`.
 - **Typed commands:**
-  - The executable must be on `PATH` and be a regular executable file.
+  - The executable must be on `PATH` and be a regular executable file. The
+    `PATH` scan skips relative entries and caps the entries it reads.
   - No shell is used, except "Run in Terminal" with the user's own line.
-- **Icons:** theme names, or absolute paths from desktop files, loaded by
-  Qt's icon loader.
+    Run uses the two-argument `CommandLauncherJob(executable, args)`.
+  - The row shows the line as typed (only control and bidi characters
+    removed), so what is shown is what runs.
+- **Icons:** theme names matching `[A-Za-z0-9._-]{1,128}`, or absolute paths
+  (no scheme, no `..`, at most 4 KiB), loaded by Qt's icon loader. Anything
+  else (`https:` and `file:` URLs included) falls back to a generic icon, so
+  no icon reaches the network.
 - **Logs:** the journal never gets query text, file names or paths of what
-  the user ran; only timings, counts and error kinds.
+  the user ran; only timings, counts and error kinds. `Query` and
+  `ResultItem` print redacted under `{:?}`, so a stray debug log cannot leak
+  them.
+- **Invisible characters:** control, bidi, zero-width, variation selector,
+  tag and filler characters are removed from shown text, so two names
+  cannot look the same while differing.
+- **Matching cost:** typo-tolerant matching runs on names only and on
+  fields of at most 128 characters, so crafted long paths cannot make a
+  keystroke slow.
 - **The service unit:** it cannot use `NoNewPrivileges`, seccomp or
   `RestrictSUIDSGID`. Apps started from it inherit them, which would break
   `sudo` and `pkexec` in a terminal launched from the launcher. It gets

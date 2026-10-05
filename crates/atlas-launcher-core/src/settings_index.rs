@@ -5,13 +5,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::fsutil::read_capped;
 use crate::result::{Action, Kind, ResultItem, prior};
-use crate::text::{Prepared, Query, clean_display_max, score_fields};
+use crate::text::{Prepared, Query, clean_display_max, score_fields, valid_icon};
 
 /// Where Settings installs its index.
 pub const DEFAULT_PATH: &str = "/usr/share/atlas-settings/search-index.json";
@@ -94,30 +94,31 @@ pub struct SettingsIndex {
     pub skipped: usize,
 }
 
-/// Whether `link` matches `[a-z0-9-]+(/[a-z0-9-]+)*` and fits 128 bytes.
+/// Whether `link` matches `[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*` (no
+/// segment starts with `-`) and fits 128 bytes.
 pub fn valid_link(link: &str) -> bool {
     !link.is_empty()
         && link.len() <= MAX_LINK_BYTES
         && link.split('/').all(|seg| {
-            !seg.is_empty()
-                && seg
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            let b = seg.as_bytes();
+            b.first()
+                .is_some_and(|f| f.is_ascii_lowercase() || f.is_ascii_digit())
+                && b.iter()
+                    .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
         })
 }
 
-pub(crate) fn valid_icon(icon: &str) -> bool {
-    (1..=128).contains(&icon.len())
-        && icon
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-/// The locale list to pick translations with, from `LANGUAGE` and
-/// `LC_MESSAGES`: "de_DE.UTF-8@euro" gives ["de_DE", "de", "C"], and
-/// "de_DE:fr" gives ["de_DE", "de", "fr", "C"]. `LANGUAGE` entries come
-/// first. Always ends with "C".
-pub fn locale_chain(language: Option<&str>, lc_messages: Option<&str>) -> Vec<String> {
+/// The locale list to pick translations with, in gettext's order: the
+/// `LANGUAGE` colon list first, then the first set of `LC_ALL`,
+/// `LC_MESSAGES` and `LANG`. "de_DE.UTF-8@euro" gives ["de_DE", "de", "C"],
+/// and "de_DE:fr" gives ["de_DE", "de", "fr", "C"]. "C" and "POSIX" add
+/// nothing. Always ends with "C".
+pub fn locale_chain(
+    language: Option<&str>,
+    lc_all: Option<&str>,
+    lc_messages: Option<&str>,
+    lang: Option<&str>,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |name: &str| {
         let name = name.split(['.', '@']).next().unwrap_or("");
@@ -141,7 +142,11 @@ pub fn locale_chain(language: Option<&str>, lc_messages: Option<&str>) -> Vec<St
             push(lang);
         }
     };
-    for src in [language, lc_messages].into_iter().flatten() {
+    let category = [lc_all, lc_messages, lang]
+        .into_iter()
+        .flatten()
+        .find(|v| !v.is_empty());
+    for src in [language, category].into_iter().flatten() {
         for part in src.split(':').take(16) {
             add(part);
         }
@@ -200,11 +205,16 @@ impl SettingsIndex {
     /// Reads and parses the index at `path`, reading at most the size cap
     /// plus one byte. This is file IO: call it off the GUI thread.
     pub fn load(path: &Path, locales: &[String]) -> Result<SettingsIndex, IndexError> {
-        let file = std::fs::File::open(path).map_err(IndexError::Io)?;
-        let mut buf = Vec::new();
-        file.take(MAX_BYTES as u64 + 1)
-            .read_to_end(&mut buf)
-            .map_err(IndexError::Io)?;
+        let buf = match read_capped(path, MAX_BYTES as u64) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                return Err(IndexError::Io(std::io::ErrorKind::NotFound.into()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(IndexError::TooLarge);
+            }
+            Err(e) => return Err(IndexError::Io(e)),
+        };
         Self::parse(&buf, locales)
     }
 
@@ -365,7 +375,7 @@ mod tests {
 
     #[test]
     fn locale_fallback() {
-        let de = locale_chain(Some("de_DE.UTF-8"), None);
+        let de = locale_chain(None, None, None, Some("de_DE.UTF-8"));
         let ix = SettingsIndex::parse(SAMPLE.as_bytes(), &de).unwrap();
         let r = ix.search(&q("anzeigen"));
         assert_eq!(r[0].title, "Anzeigen");
@@ -378,21 +388,29 @@ mod tests {
 
     #[test]
     fn locale_chains() {
+        let lc = |l, a, m, g| locale_chain(l, a, m, g);
         assert_eq!(
-            locale_chain(Some("de_DE.UTF-8@euro"), None),
+            lc(Some("de_DE.UTF-8@euro"), None, None, None),
             ["de_DE", "de", "C"]
         );
         assert_eq!(
-            locale_chain(Some("de_DE:fr"), None),
+            lc(Some("de_DE:fr"), None, None, None),
             ["de_DE", "de", "fr", "C"]
         );
-        assert_eq!(locale_chain(None, None), ["C"]);
-        assert_eq!(locale_chain(Some(""), Some("C.UTF-8")), ["C"]);
+        assert_eq!(lc(None, None, None, None), ["C"]);
         assert_eq!(
-            locale_chain(Some("fr"), Some("de_DE.UTF-8")),
+            lc(None, None, None, Some("de_DE.UTF-8")),
+            ["de_DE", "de", "C"]
+        );
+        assert_eq!(lc(Some(""), None, Some("C.UTF-8"), None), ["C"]);
+        // The first set of LC_ALL, LC_MESSAGES, LANG wins; LANGUAGE goes first.
+        assert_eq!(
+            lc(Some("fr"), Some("de_DE.UTF-8"), Some("es"), Some("it")),
             ["fr", "de_DE", "de", "C"]
         );
-        assert_eq!(locale_chain(Some("../x:a b"), None), ["C"]);
+        assert_eq!(lc(None, Some(""), Some("es"), Some("it")), ["es", "C"]);
+        assert_eq!(lc(None, None, None, Some("POSIX")), ["C"]);
+        assert_eq!(lc(Some("../x:a b"), None, None, None), ["C"]);
     }
 
     #[test]
@@ -443,6 +461,8 @@ mod tests {
             "../x",
             "",
             "a_b",
+            "-a",
+            "a/-b",
             &"a".repeat(129),
         ];
         let mut entries: Vec<String> = links
@@ -463,6 +483,7 @@ mod tests {
         assert_eq!(ix.skipped, entries.len() - 1);
         assert_eq!(ix.entries()[0].icon, "preferences-system");
         assert!(valid_link("a-1/b/c"));
+        assert!(!valid_link("-x") && !valid_link("a/-b") && !valid_link("a/b/-"));
         assert!(valid_link(&"a".repeat(128)));
     }
 
@@ -493,6 +514,11 @@ mod tests {
         ));
         assert!(matches!(
             SettingsIndex::load(&dir.path().join("none"), &c()),
+            Err(IndexError::Io(_))
+        ));
+        // A directory or FIFO is refused, not read (or waited on).
+        assert!(matches!(
+            SettingsIndex::load(dir.path(), &c()),
             Err(IndexError::Io(_))
         ));
     }

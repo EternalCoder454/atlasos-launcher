@@ -9,6 +9,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 /// Reads a whole file, but never more than `cap` bytes. `Ok(None)` when it
 /// doesn't exist; `InvalidData` when it is larger than `cap` (decided by
@@ -76,8 +77,10 @@ fn cstr(s: &OsStr) -> io::Result<CString> {
 }
 
 /// Writes `bytes` to `path` so that a crash leaves either the old file or the
-/// new one: a temp file in the same directory (`O_CREAT|O_EXCL`, `mode`),
-/// fsync, rename over the target, fsync of the directory. Missing parent
+/// new one: a temp file in the same directory (`O_CREAT|O_EXCL`), fsync,
+/// rename over the target, fsync of the directory. An existing target keeps
+/// its mode; `mode` is for a new file. A failed directory fsync after the
+/// rename is only logged (the data is in place). Missing parent
 /// directories are created with mode 0700. A symlink at `path` is written
 /// through. On any error the temp file is removed.
 ///
@@ -105,6 +108,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let dfd = dir_file.as_raw_fd();
 
     let final_name = cstr(&name)?;
+    // An existing regular target keeps its permissions (the user may have
+    // loosened or tightened them); `mode` only applies to a new file.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `dfd` is a live directory fd, `final_name` a valid C string and
+    // `st` a writable stat buffer.
+    let existing = unsafe { libc::fstatat(dfd, final_name.as_ptr(), &mut st, 0) } == 0
+        && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+    let mode = if existing {
+        (st.st_mode & 0o7777) as u32
+    } else {
+        mode
+    };
     // Keep the temp name well under NAME_MAX (255) whatever the target's is.
     let stem: Vec<u8> = name.as_bytes().iter().copied().take(120).collect();
     let mut last_err = None;
@@ -118,12 +133,67 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last_err = Some(e),
             Err(e) => return Err(e),
             Ok(()) => {
-                // Make the rename itself durable.
-                return dir_file.sync_all();
+                // Make the rename itself durable. The data is already in
+                // place, so a failure here is a warning, not an error.
+                if let Err(e) = dir_file.sync_all() {
+                    log::warn!("could not sync the folder after a write: {:?}", e.kind());
+                }
+                return Ok(());
             }
         }
     }
     Err(last_err.unwrap_or_else(|| io::Error::other("could not create a temp file")))
+}
+
+/// Removes `.{name}.tmp-*` files in `dir` last modified more than
+/// `older_than` ago: what a crash between creating and renaming a temp file
+/// leaves behind. Only regular files are removed, through the folder's
+/// descriptor (a symlink is never followed). Returns how many were removed;
+/// errors only skip the entry.
+pub fn sweep_stale_temps(dir: &Path, name: &str, older_than: Duration) -> usize {
+    let prefix = format!(".{name}.tmp-");
+    let Ok(dir_file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(dir)
+    else {
+        return 0;
+    };
+    let dfd = dir_file.as_raw_fd();
+    let Ok(rd) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in rd.flatten() {
+        let fname = entry.file_name();
+        // Names are cut at 120 bytes of the target's, so match the prefix on
+        // the bytes of the cut name too.
+        if !fname.as_bytes().starts_with(prefix.as_bytes()) {
+            continue;
+        }
+        let Ok(c) = cstr(&fname) else { continue };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid dir fd, C string and stat buffer; AT_SYMLINK_NOFOLLOW
+        // so a link is seen as a link.
+        let ok = unsafe { libc::fstatat(dfd, c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0;
+        if !ok || (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+            continue;
+        }
+        let mtime = SystemTime::UNIX_EPOCH
+            + Duration::new(
+                st.st_mtime.max(0) as u64,
+                st.st_mtime_nsec.clamp(0, 999_999_999) as u32,
+            );
+        // A future mtime is not "older".
+        if now.duration_since(mtime).is_ok_and(|age| age > older_than)
+            // SAFETY: as above; unlinkat on a name, never a followed link.
+            && unsafe { libc::unlinkat(dfd, c.as_ptr(), 0) } == 0
+        {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn write_via_temp(
@@ -274,6 +344,65 @@ mod tests {
         assert!(t.join("inner").exists());
         let names: Vec<_> = fs::read_dir(d.path()).unwrap().collect();
         assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn existing_target_keeps_its_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f");
+        fs::write(&p, b"old").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&p, b"new", 0o600).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // A new file gets the asked mode.
+        let n = d.path().join("g");
+        write_atomic(&n, b"x", 0o600).unwrap();
+        assert_eq!(
+            fs::metadata(&n).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_old_regular_temps() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join(".usage.tsv.tmp-1-0");
+        let fresh = d.path().join(".usage.tsv.tmp-1-1");
+        let other = d.path().join(".other.tmp-1-0");
+        let keep = d.path().join("usage.tsv");
+        for f in [&old, &fresh, &other, &keep] {
+            fs::write(f, b"x").unwrap();
+        }
+        let long_ago = SystemTime::now() - Duration::from_secs(7200);
+        for f in [&old, &other, &keep] {
+            fs::File::options()
+                .write(true)
+                .open(f)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        // A symlink with a matching name is left alone, and so is its target.
+        let target = d.path().join("victim");
+        fs::write(&target, b"v").unwrap();
+        symlink(&target, d.path().join(".usage.tsv.tmp-2-0")).unwrap();
+        // So is a directory.
+        fs::create_dir(d.path().join(".usage.tsv.tmp-3-0")).unwrap();
+        assert_eq!(
+            sweep_stale_temps(d.path(), "usage.tsv", Duration::from_secs(3600)),
+            1
+        );
+        assert!(!old.exists() && fresh.exists() && other.exists() && keep.exists());
+        assert!(target.exists());
+        assert!(d.path().join(".usage.tsv.tmp-3-0").is_dir());
+        assert_eq!(
+            sweep_stale_temps(&d.path().join("missing"), "x", Duration::ZERO),
+            0
+        );
     }
 
     #[test]

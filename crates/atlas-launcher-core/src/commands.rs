@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::result::{Action, Kind, ResultItem, SessionAction, prior};
-use crate::text::{Prepared, Query, clean_display, score_fields};
+use crate::text::{MAX_QUERY_CHARS, Prepared, Query, is_unsafe_char, score_fields};
 
 /// Most `PATH` folders scanned.
 pub const MAX_PATH_DIRS: usize = 64;
@@ -17,6 +17,12 @@ pub const MAX_PATH_DIRS: usize = 64;
 pub const MAX_NAMES: usize = 20_000;
 /// Longest executable name, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
+/// Most directory entries looked at in one `PATH` folder.
+pub const MAX_ENTRIES_PER_DIR: usize = 10_000;
+/// Most directory entries looked at in all `PATH` folders together.
+pub const MAX_ENTRIES_TOTAL: usize = 100_000;
+/// Longest command line shown in a row title, in characters.
+const MAX_SHOWN_CHARS: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Session commands
@@ -269,6 +275,32 @@ pub fn parse_command_line(line: &str) -> CommandPlan {
 // ---------------------------------------------------------------------------
 // PATH executables
 
+/// Whether the current user may execute `path` (`faccessat` with
+/// `AT_EACCESS`, so the effective ids count; follows symlinks).
+fn can_execute(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` is a valid NUL-terminated string that outlives the call.
+    unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// The line as typed with unsafe characters removed (spacing kept), cut at
+/// 512 characters with "…".
+fn shown_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len().min(MAX_SHOWN_CHARS * 4));
+    for (n, c) in line.chars().filter(|c| !is_unsafe_char(*c)).enumerate() {
+        if n >= MAX_SHOWN_CHARS {
+            out.pop();
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The executables on `PATH`, listed once (off the GUI thread). Typed
 /// commands must name one of these exactly.
 #[derive(Debug, Default)]
@@ -280,13 +312,15 @@ pub struct PathCache {
 }
 
 impl PathCache {
-    /// Lists the regular files with any execute bit in each absolute folder
-    /// of `path_var` (at most 64 folders, 20,000 names; names of at most 255
-    /// bytes and valid UTF-8). Symlinks count by what they point to. File
+    /// Lists the regular files the user may execute in each absolute folder
+    /// of `path_var` (at most 64 folders, 20,000 names, 10,000 entries looked
+    /// at per folder and 100,000 in all; names of at most 255 bytes and valid
+    /// UTF-8). Symlinks count by what they point to. File
     /// IO: call it off the GUI thread.
     pub fn scan(path_var: &str) -> PathCache {
         let mut cache = PathCache::default();
         let mut seen: HashSet<&str> = HashSet::new();
+        let mut visited_total = 0usize;
         for dir in path_var.split(':') {
             if cache.dirs.len() >= MAX_PATH_DIRS {
                 break;
@@ -300,10 +334,14 @@ impl PathCache {
             let Ok(rd) = std::fs::read_dir(dir_path) else {
                 continue;
             };
-            for entry in rd.flatten() {
-                if cache.exes.len() >= MAX_NAMES {
+            for (n, entry) in rd.flatten().enumerate() {
+                if cache.exes.len() >= MAX_NAMES
+                    || n >= MAX_ENTRIES_PER_DIR
+                    || visited_total >= MAX_ENTRIES_TOTAL
+                {
                     break;
                 }
+                visited_total += 1;
                 let name_os = entry.file_name();
                 let Some(name) = name_os.to_str() else {
                     continue;
@@ -315,7 +353,7 @@ impl PathCache {
                 let Ok(md) = std::fs::metadata(&full) else {
                     continue;
                 };
-                if !md.is_file() || md.permissions().mode() & 0o111 == 0 {
+                if !md.is_file() || md.permissions().mode() & 0o111 == 0 || !can_execute(&full) {
                     continue;
                 }
                 let Some(full) = full.to_str() else { continue };
@@ -350,6 +388,10 @@ impl PathCache {
     /// `PATH`: a direct run when the line has no shell syntax (0.9 × prior)
     /// and always one in the terminal (0.85 × prior).
     pub fn search(&self, q: &Query) -> Vec<ResultItem> {
+        // A query cut at the cap may not be what the user typed: run nothing.
+        if q.raw.chars().take(MAX_QUERY_CHARS).count() >= MAX_QUERY_CHARS {
+            return Vec::new();
+        }
         let line = q.raw.trim();
         let Some(first) = line.split_whitespace().next() else {
             return Vec::new();
@@ -364,7 +406,7 @@ impl PathCache {
             return Vec::new();
         };
         let p = prior(Kind::Command);
-        let shown = clean_display(line);
+        let shown = shown_line(line);
         let mut out = Vec::with_capacity(2);
         if let CommandPlan::Direct { args, .. } = plan {
             out.push(ResultItem {
@@ -647,6 +689,61 @@ mod tests {
         assert!(c.search(&q("")).is_empty());
         assert!(c.search(&q("/bin/mytool")).is_empty());
         assert!(c.search(&q("nothing here")).is_empty());
+    }
+
+    #[test]
+    fn titles_keep_spacing_and_cap_length() {
+        let t = tempfile::tempdir().unwrap();
+        make_exe(t.path(), "mytool", 0o755);
+        let c = PathCache::scan(t.path().to_str().unwrap());
+        let r = c.search(&q("mytool  a   b"));
+        assert_eq!(r[0].title, "Run ‘mytool  a   b’");
+        // Under the query cap nothing is cut; the title cap is separate.
+        assert_eq!(shown_line("a\u{202e}b\u{200b}c"), "abc");
+        let long = "x".repeat(600);
+        let s = shown_line(&long);
+        assert_eq!(s.chars().count(), MAX_SHOWN_CHARS);
+        assert!(s.ends_with('…'));
+        assert_eq!(shown_line(&"y".repeat(512)), "y".repeat(512));
+    }
+
+    #[test]
+    fn cut_queries_offer_no_run_rows() {
+        let t = tempfile::tempdir().unwrap();
+        make_exe(t.path(), "mytool", 0o755);
+        let c = PathCache::scan(t.path().to_str().unwrap());
+        let ok = format!("mytool {}", "a".repeat(MAX_QUERY_CHARS - 8));
+        assert_eq!(ok.chars().count(), MAX_QUERY_CHARS - 1);
+        assert_eq!(c.search(&q(&ok)).len(), 2);
+        let cut = format!("mytool {}", "a".repeat(MAX_QUERY_CHARS));
+        assert!(c.search(&q(&cut)).is_empty());
+        let exact = format!("mytool {}", "a".repeat(MAX_QUERY_CHARS - 7));
+        assert!(c.search(&q(&exact)).is_empty());
+    }
+
+    #[test]
+    fn path_scan_needs_real_execute_access() {
+        let t = tempfile::tempdir().unwrap();
+        make_exe(t.path(), "mine", 0o755);
+        // Execute bit for others only: the owner (us) can't run it.
+        make_exe(t.path(), "others", 0o001);
+        let c = PathCache::scan(t.path().to_str().unwrap());
+        assert!(c.lookup("mine").is_some());
+        // Root passes every access check, so only assert it as a normal user.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(c.lookup("others").is_none());
+        }
+    }
+
+    #[test]
+    fn path_scan_caps_entries_per_folder() {
+        let t = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_ENTRIES_PER_DIR + 50) {
+            std::fs::write(t.path().join(format!("f{i}")), "").unwrap();
+        }
+        let c = PathCache::scan(t.path().to_str().unwrap());
+        assert!(c.is_empty()); // none executable, and the scan ended
     }
 
     #[test]
