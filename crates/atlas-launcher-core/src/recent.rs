@@ -93,7 +93,7 @@ fn attr_value(e: &BytesStart<'_>, name: &str) -> Option<String> {
     None
 }
 
-fn valid_mime(m: &str) -> bool {
+pub(crate) fn valid_mime(m: &str) -> bool {
     if m.len() > 255 {
         return false;
     }
@@ -141,7 +141,7 @@ fn percent_decode(s: &str) -> Option<String> {
 
 /// A path as a `file:` URI: unreserved bytes and `/` stay, the rest is
 /// percent-encoded.
-fn file_uri(path: &str) -> String {
+pub(crate) fn file_uri(path: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(path.len() + 8);
     out.push_str("file://");
@@ -159,7 +159,7 @@ fn file_uri(path: &str) -> String {
 
 /// A `file:` href as a clean absolute path and whether it named a folder
 /// (trailing slash); None for anything else.
-fn href_to_path(href: &str) -> Option<(String, bool)> {
+pub(crate) fn href_to_path(href: &str) -> Option<(String, bool)> {
     if href.len() > MAX_PATH_BYTES * 3 || href.len() < 6 {
         return None;
     }
@@ -316,7 +316,7 @@ fn bookmark_start(e: &BytesStart<'_>) -> Partial {
     p
 }
 
-fn icon_for(f: &RecentFile) -> String {
+pub(crate) fn icon_for(f: &RecentFile) -> String {
     if f.is_dir {
         return "folder".into();
     }
@@ -345,12 +345,12 @@ fn icon_for(f: &RecentFile) -> String {
     }
 }
 
-fn parent_of(path: &Path) -> &str {
+pub(crate) fn parent_of(path: &Path) -> &str {
     path.parent().and_then(Path::to_str).unwrap_or("/")
 }
 
 /// `dir` with a leading `home` shown as "~".
-fn tilde(dir: &str, home: &Path) -> String {
+pub(crate) fn tilde(dir: &str, home: &Path) -> String {
     if let Some(h) = home.to_str()
         && h.starts_with('/')
         && h != "/"

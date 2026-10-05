@@ -106,7 +106,7 @@ pub fn valid_link(link: &str) -> bool {
         })
 }
 
-fn valid_icon(icon: &str) -> bool {
+pub(crate) fn valid_icon(icon: &str) -> bool {
     (1..=128).contains(&icon.len())
         && icon
             .bytes()

@@ -19,7 +19,7 @@ pub fn fold(s: &str) -> String {
 
 /// Whether `c` is a control or bidi-formatting character that untrusted text
 /// must not carry into the UI (it could reorder or hide what is shown).
-fn is_unsafe_char(c: char) -> bool {
+pub fn is_unsafe_char(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{200B}'..='\u{200F}' // zero-width and LRM/RLM
