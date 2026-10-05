@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(atlas-launcher VERSION 0.1.0 LANGUAGES CXX)
+project(atlas-launcher VERSION 0.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -109,6 +109,6 @@ install(FILES data/net.eterneon.atlas.launcher.service
 install(FILES data/atlas-launcher.service
         DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/user)
 install(FILES data/pinned.list
-        DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/xdg/atlas-launcher)
+        DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/atlas-launcher)
 install(DIRECTORY ${WORKSPACE_DIR}/plasmoid/net.eterneon.atlas.launcher.button
         DESTINATION ${CMAKE_INSTALL_DATADIR}/plasma/plasmoids)

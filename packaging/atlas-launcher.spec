@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           atlas-launcher
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        AtlasOS Launcher, the Start menu and search of AtlasOS
 License:        MIT
@@ -109,5 +109,8 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.la
 %config(noreplace) %{_sysconfdir}/xdg/atlas-launcher/pinned.list
 
 %changelog
+* Mon Oct 05 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.1.1-1
+- Install the default pins under /etc/xdg
+
 * Mon Oct 05 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.1.0-1
 - First package
