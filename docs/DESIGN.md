@@ -116,9 +116,14 @@ with no C++ in the shell:
   The coordinator's update script copies them into the button's
   `ImportPins` config key. The button sends them once, then clears the key.
 - It calls D-Bus through `org.kde.plasma.workspace.dbus` (in Plasma 6.7:
-  `DBusConnection.asyncCall` with typed arguments, and `DBusProperties` for
-  `Visible`). The module has no struct type, so the button sends `anchor` as
-  an array of four ints, which the launcher accepts beside `(iiii)`.
+  `SessionBus.asyncCall`, and `Properties` for `Visible`). The module only
+  sends its own typed values (a plain JS object is dropped, and the call goes
+  out with no arguments), so the options go through a `DBus.dict` property.
+  It has no struct type, so `anchor` is an array of four numbers (`av`),
+  which the launcher accepts beside `(iiii)`.
+- It is the applet's full representation, shown in place, with no
+  background: a compact-only applet never gets its compact item built in
+  the dock panel, and draws nothing.
 
 Without a dock anchor (no dock, or before the button loads), Start mode opens
 at the bottom centre of the active screen. Layer-shell keeps it clear of any
@@ -157,8 +162,14 @@ component `net.eterneon.atlas.launcher`:
 The GlobalShortcuts portal (Atlas.Ui's AtlasGlobalShortcut) is not used: it
 asks the user to approve the binding, which a system launcher must not do.
 
-**Meta** is KWin's modifier-only shortcut, set by the image in `/etc/xdg/kwinrc`
-(see "Image changes").
+**Meta** is plasmashell's "Activate Application Launcher" global shortcut
+(Meta, Alt+F1). KWin 6.7 no longer reads `[ModifierOnlyShortcuts]`: Plasma 6
+binds a lone Meta through KGlobalAccel, and plasmashell's
+`activateLauncherMenu` emits `activated` on the panel applet that provides
+`org.kde.plasma.launchermenu`, which is the dock button. The button answers
+with `ToggleStart(a{sv})`. So Meta does go through plasmashell; when the
+shell is down, the dock button is too, and Alt+Space (the launcher's own
+KGlobalAccel binding) still opens Search.
 
 **Files:**
 
@@ -612,11 +623,9 @@ cheaper of the two that meets the open budget wins.
    `AndromedaLauncher` as the dock's first item.
 4. Remove `system_files/usr/share/plasma/plasmoids/AndromedaLauncher/`, and
    `org.kde.plasma.simplekickoff/` if it is still there.
-5. `/etc/xdg/kwinrc`:
-   ```
-   [ModifierOnlyShortcuts]
-   Meta=net.eterneon.atlas.launcher,/net/eterneon/atlas/launcher,net.eterneon.atlas.Launcher1,ToggleStart
-   ```
+5. Meta needs no image change (see "Global shortcuts": plasmashell's
+   launcher shortcut reaches the dock button). The `[ModifierOnlyShortcuts]`
+   group once planned for `/etc/xdg/kwinrc` is not read by KWin 6.7.
 6. Alt+Space, Alt+F2 and Meta+S: no image change. The launcher registers
    them with KGlobalAccel. KRunner's shortcuts file stays deleted.
 7. A Plasma update script, `atlasos-2026MMDD-launcher.js`. In every panel it
