@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Window
@@ -33,7 +34,7 @@ PlasmoidItem {
     // launcher wants them: anchor is (x, y, w, h), sent as an array (the
     // QML module has no struct type; the launcher accepts av).
     function anchorOptions() {
-        const item = root.fullRepresentationItem;
+        const item = root.fullRepresentationItem as LauncherButton;
         // Attached properties (Window.window) only resolve in the item's own
         // scope, so the button exposes its window as a plain property.
         if (!item || !item.panelWindow || item.width <= 0 || item.height <= 0) {
@@ -116,16 +117,19 @@ PlasmoidItem {
 
     Component.onCompleted: Qt.callLater(root.importPins)
 
-    fullRepresentation: MouseArea {
-        id: button
-
+    // The button, a named type so anchorOptions() can read its window.
+    component LauncherButton: MouseArea {
         readonly property var panelWindow: Window.window
         readonly property string screenName: Screen.name
+    }
 
-        Layout.minimumWidth: root.vertical ? -1 : height
-        Layout.preferredWidth: root.vertical ? -1 : height
-        Layout.minimumHeight: root.vertical ? width : -1
-        Layout.preferredHeight: root.vertical ? width : -1
+    fullRepresentation: LauncherButton {
+        id: button
+
+        Layout.minimumWidth: root.vertical ? -1 : button.height
+        Layout.preferredWidth: root.vertical ? -1 : button.height
+        Layout.minimumHeight: root.vertical ? button.width : -1
+        Layout.preferredHeight: root.vertical ? button.width : -1
 
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton

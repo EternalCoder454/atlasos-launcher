@@ -174,21 +174,65 @@ pub fn group_of(categories: &[String]) -> &'static str {
     let has = |names: &[&str]| categories.iter().any(|c| names.contains(&c.as_str()));
     if has(&["Network", "WebBrowser", "Email", "Chat", "InstantMessaging"]) {
         "internet"
-    } else if has(&["Office", "WordProcessor", "Spreadsheet", "Presentation", "Calendar", "ContactManagement"]) {
+    } else if has(&[
+        "Office",
+        "WordProcessor",
+        "Spreadsheet",
+        "Presentation",
+        "Calendar",
+        "ContactManagement",
+    ]) {
         "office"
-    } else if has(&["AudioVideo", "Audio", "Video", "Music", "Player", "Recorder", "TV"]) {
+    } else if has(&[
+        "AudioVideo",
+        "Audio",
+        "Video",
+        "Music",
+        "Player",
+        "Recorder",
+        "TV",
+    ]) {
         "media"
-    } else if has(&["Graphics", "Photography", "2DGraphics", "3DGraphics", "RasterGraphics", "VectorGraphics", "Viewer"]) {
+    } else if has(&[
+        "Graphics",
+        "Photography",
+        "2DGraphics",
+        "3DGraphics",
+        "RasterGraphics",
+        "VectorGraphics",
+        "Viewer",
+    ]) {
         "graphics"
-    } else if has(&["Development", "IDE", "TextEditor", "Debugger", "RevisionControl"]) {
+    } else if has(&[
+        "Development",
+        "IDE",
+        "TextEditor",
+        "Debugger",
+        "RevisionControl",
+    ]) {
         "development"
     } else if has(&["Game"]) {
         "games"
     } else if has(&["Education", "Science", "Math"]) {
         "education"
-    } else if has(&["System", "Settings", "Monitor", "PackageManager", "TerminalEmulator", "FileManager", "Security"]) {
+    } else if has(&[
+        "System",
+        "Settings",
+        "Monitor",
+        "PackageManager",
+        "TerminalEmulator",
+        "FileManager",
+        "Security",
+    ]) {
         "system"
-    } else if has(&["Utility", "Accessibility", "Archiving", "Compression", "Calculator", "Clock"]) {
+    } else if has(&[
+        "Utility",
+        "Accessibility",
+        "Archiving",
+        "Compression",
+        "Calculator",
+        "Clock",
+    ]) {
         "utilities"
     } else {
         "other"

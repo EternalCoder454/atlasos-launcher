@@ -66,7 +66,7 @@ FocusScope {
         const byKey = ({})
         const keys = []
         for (let i = 0; i < appRows.count; ++i) {
-            const o = appRows.objectAt(i)
+            const o = appRows.objectAt(i) as AppRow
             if (!o) {
                 continue
             }
@@ -138,13 +138,14 @@ FocusScope {
         }
     }
 
-    // The app list's rows, read into plain data for the grids.
+    // One row of the app list, read into plain data for the grids.
+    component AppRow: QtObject {
+        required property var model
+    }
     Instantiator {
         id: appRows
         model: page.apps
-        delegate: QtObject {
-            required property var model
-        }
+        delegate: AppRow {}
         onObjectAdded: Qt.callLater(page.rebuild)
         onObjectRemoved: Qt.callLater(page.rebuild)
     }
