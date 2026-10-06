@@ -50,6 +50,16 @@ bool drawnByLauncher(const QString &id)
     };
     return ids.contains(id);
 }
+
+// The web-shortcuts plugin answers every query with its default engine
+// ("Search DuckDuckGo for ..."), a second web row under the launcher's own.
+// Only its keyword shortcuts ("gg:linux", KDE's default ':' delimiter) are
+// kept.
+bool defaultWebSearch(const QString &runnerId, const QString &query)
+{
+    const bool webShortcuts = runnerId == QLatin1String("webshortcuts") || runnerId == QLatin1String("krunner_webshortcuts");
+    return webShortcuts && !query.contains(QLatin1Char(':'));
+}
 }
 
 Runners::Runners(QObject *backend, QObject *parent)
@@ -171,6 +181,7 @@ void Runners::onMatches(const QList<KRunner::QueryMatch> &matches)
         return;
     }
     m_matches.clear();
+    const QString query = manager()->query();
     QVariantList list;
     const qsizetype count = std::min<qsizetype>(matches.size(), kMaxMatches);
     list.reserve(count);
@@ -180,6 +191,9 @@ void Runners::onMatches(const QList<KRunner::QueryMatch> &matches)
             continue;
         }
         const QString runnerId = match.runner()->id();
+        if (defaultWebSearch(runnerId, query)) {
+            continue;
+        }
         const QString matchId = match.id();
         m_matches.insert({runnerId, matchId}, match);
         QVariantMap map;
