@@ -3,7 +3,9 @@ import QtQuick
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
-// A pinned app: icon over its name. Drag one onto another to reorder.
+// An app tile: icon over its name, or the icon alone (`showLabel: false`, the
+// pinned row) with the name in a tooltip. Pinned tiles drag onto each other
+// to reorder (`reorderable`).
 Item {
     id: tile
 
@@ -11,6 +13,9 @@ Item {
     required property var model
 
     property bool current: false
+    property bool showLabel: true
+    property bool reorderable: true
+    property real iconSize: Kirigami.Units.iconSizes.large
     readonly property string rowId: model.id
 
     signal clicked()
@@ -45,12 +50,13 @@ Item {
 
         LauncherItemIcon {
             anchors.horizontalCenter: parent.horizontalCenter
-            width: Kirigami.Units.iconSizes.large
+            width: tile.iconSize
             height: width
             name: tile.model.icon
         }
         AtlasLabel {
             width: parent.width
+            visible: tile.showLabel
             horizontalAlignment: Text.AlignHCenter
             text: tile.model.title
             textFormat: Text.PlainText
@@ -64,7 +70,7 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        drag.target: dragProxy
+        drag.target: tile.reorderable ? dragProxy : null
         drag.threshold: Kirigami.Units.gridUnit / 2
         onClicked: (event) => {
             if (event.button === Qt.RightButton) {
@@ -95,7 +101,7 @@ Item {
 
         LauncherItemIcon {
             anchors.centerIn: parent
-            width: Kirigami.Units.iconSizes.large
+            width: tile.iconSize
             height: width
             name: tile.model.icon
             visible: dragProxy.Drag.active
@@ -106,6 +112,7 @@ Item {
     DropArea {
         id: drop
         anchors.fill: parent
+        enabled: tile.reorderable
         keys: ["atlas-launcher-pin"]
         onDropped: (event) => {
             // The proxy's Drag.source is the tile it came from.
@@ -115,5 +122,10 @@ Item {
                 event.accept()
             }
         }
+    }
+
+    AtlasToolTip {
+        text: tile.model.title
+        shown: !tile.showLabel && (drag.containsMouse || tile.activeFocus)
     }
 }

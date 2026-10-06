@@ -1,12 +1,21 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Templates as T
+import QtCore
+import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
-// Start's page before anything is typed, one scrolling list: Pinned (6
-// columns, 3 rows until Show All), Recent (apps on the left, files on the
-// right, 3 rows until More), then All Apps A–Z with letter headers that open
-// the jump-to-letter grid. Tab moves between the regions, arrows within.
+// Start's page before anything is typed (docs/DESIGN.md, "Start mode"):
+// search first, then quiet suggestions, then browsing. One scrolling page:
+//
+// 1. Pinned: one row of icons without labels (the name is in the tooltip),
+//    Spotlight's quick row rather than Windows' labelled grid.
+// 2. Recent: small chips for the last apps and files, never a block.
+// 3. Apps: every app as a grid, grouped by kind (Internet, Office, Media...)
+//    or A–Z, chosen with the switch beside the heading and remembered.
+//
+// Tab moves between the regions, the arrows within; Up from the first row
+// goes back to the search field.
 FocusScope {
     id: page
 
@@ -19,134 +28,200 @@ FocusScope {
     required property var recentApps
     required property var recentFiles
 
-    // The list's header (Pinned and Recent), untyped: it is an inline Column.
-    readonly property var header: list.headerItem
-
-    property bool pinsExpanded: false
-    property bool recentExpanded: false
-
     readonly property int columns: 6
-    readonly property real tileSize: Math.floor(width / columns)
+    readonly property real cell: Math.floor(width / columns)
+    readonly property real pinCell: Math.floor(width / 8)
     readonly property bool showRecent: options.showRecent && (recentApps.count > 0 || showRecentFiles)
     readonly property bool showRecentFiles: options.showRecentFiles && recentFiles.count > 0
+    readonly property int recentShown: 3
+
+    // 0: grouped by kind, 1: A–Z. Remembered across opens and logins.
+    readonly property int appView: viewState.appView
+    // [{ key, title, items: [{ id, title, subtitle, icon }] }], in display order.
+    property var sections: []
 
     // Up from the first region: back to the search field.
     signal backToField()
 
+    function groupTitle(key) {
+        switch (key) {
+        case "internet": return qsTr("Internet")
+        case "office": return qsTr("Office")
+        case "media": return qsTr("Music & Video")
+        case "graphics": return qsTr("Graphics")
+        case "development": return qsTr("Development")
+        case "games": return qsTr("Games")
+        case "education": return qsTr("Education")
+        case "system": return qsTr("System")
+        case "utilities": return qsTr("Utilities")
+        default: return qsTr("Other")
+        }
+    }
+
+    // The order the groups are shown in (catalog::GROUPS).
+    readonly property var groupOrder: ["internet", "office", "media", "graphics", "development", "games", "education", "system", "utilities", "other"]
+
+    // The sections, from the A–Z app list (kept in its order inside each).
+    function rebuild() {
+        const byKey = ({})
+        const keys = []
+        for (let i = 0; i < appRows.count; ++i) {
+            const o = appRows.objectAt(i)
+            if (!o) {
+                continue
+            }
+            const m = o.model
+            const item = { id: m.id, title: m.title, subtitle: m.subtitle, icon: m.icon }
+            let key
+            if (page.appView === 1) {
+                key = m.section.length > 0 ? m.section : "#"
+            } else {
+                key = page.backend.categoryOf(m.id)
+                if (key.length === 0) {
+                    key = "other"
+                }
+            }
+            if (!byKey[key]) {
+                byKey[key] = []
+                keys.push(key)
+            }
+            byKey[key].push(item)
+        }
+        const order = page.appView === 1 ? keys : page.groupOrder.filter(k => byKey[k] !== undefined)
+        page.sections = order.map(k => ({
+            key: k,
+            title: page.appView === 1 ? k : page.groupTitle(k),
+            items: byKey[k]
+        }))
+    }
+
     // A fresh page each time the panel opens.
     function reset() {
-        pinsExpanded = false
-        recentExpanded = false
-        // Not close(): that hands the focus to the list, and the field has it.
         letters.visible = false
-        list.currentIndex = -1
-        list.positionViewAtBeginning()
+        flick.contentY = 0
+        pinList.currentIndex = -1
     }
 
     // Down from the field: the first region that has something.
     function focusFirst() {
-        const h = page.header
-        if (h && page.pins.count > 0) {
-            h.pinGrid.currentIndex = Math.max(0, h.pinGrid.currentIndex)
-            h.pinGrid.forceActiveFocus(Qt.TabFocusReason)
-        } else if (h && page.showRecent && page.recentApps.count > 0) {
-            h.recentAppList.currentIndex = 0
-            h.recentAppList.forceActiveFocus(Qt.TabFocusReason)
+        if (pinList.count > 0) {
+            pinList.currentIndex = Math.max(0, pinList.currentIndex)
+            pinList.forceActiveFocus(Qt.TabFocusReason)
+        } else if (page.showRecent && chips.children.length > 1) {
+            chips.children[0].forceActiveFocus(Qt.TabFocusReason)
         } else {
-            list.currentIndex = 0
-            list.forceActiveFocus(Qt.TabFocusReason)
+            page.focusSection(0, true)
         }
+    }
+
+    // Moves the keyboard into section `i`, at its first or last row.
+    function focusSection(i, top) {
+        const grid = sectionRepeater.itemAt(i) as LauncherAppSection
+        if (!grid) {
+            return false
+        }
+        grid.enter(top)
+        return true
     }
 
     function jumpTo(letter) {
         letters.close()
-        const at = backend.letterIndex(letter)
-        if (at >= 0) {
-            list.currentIndex = at
-            list.positionViewAtIndex(at, ListView.Beginning)
-            list.forceActiveFocus(Qt.TabFocusReason)
+        for (let i = 0; i < page.sections.length; ++i) {
+            if (page.sections[i].key === letter) {
+                const section = sectionRepeater.itemAt(i)
+                if (section) {
+                    flick.contentY = Math.min(section.y + appsColumn.y, Math.max(0, flick.contentHeight - flick.height))
+                    page.focusSection(i, true)
+                }
+                return
+            }
         }
     }
 
-    ListView {
-        id: list
+    // The app list's rows, read into plain data for the grids.
+    Instantiator {
+        id: appRows
+        model: page.apps
+        delegate: QtObject {
+            required property var model
+        }
+        onObjectAdded: Qt.callLater(page.rebuild)
+        onObjectRemoved: Qt.callLater(page.rebuild)
+    }
+    onAppViewChanged: rebuild()
+
+    Settings {
+        id: viewState
+        location: StandardPaths.writableLocation(StandardPaths.GenericConfigLocation) + "/atlas-launcher/state.conf"
+        category: "Start"
+        property int appView: 0
+    }
+
+    Flickable {
+        id: flick
 
         anchors.fill: parent
         clip: true
-        model: page.apps
-        currentIndex: -1
-        keyNavigationEnabled: true
-        highlightMoveDuration: 0
+        contentHeight: column.implicitHeight
         boundsBehavior: Flickable.StopAtBounds
-        activeFocusOnTab: true
-        reuseItems: true
-        Accessible.role: Accessible.List
-        Accessible.name: qsTr("All Apps")
         T.ScrollBar.vertical: AtlasScrollBar {}
 
-        onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
+        // Keeps the focused item in view.
+        function show(item) {
+            if (!item) {
+                return
+            }
+            const p = item.mapToItem(column, 0, 0)
+            if (p.y < contentY) {
+                contentY = Math.max(0, p.y - AtlasStyle.spacing)
+            } else if (p.y + item.height > contentY + height) {
+                contentY = Math.min(contentHeight - height, p.y + item.height - height + AtlasStyle.spacing)
+            }
+        }
 
-        header: Column {
-            id: header
-
-            property alias pinGrid: pinGrid
-            property alias recentAppList: recentAppList
-            property alias recentFileList: recentFileList
-
-            width: list.width
-            spacing: AtlasStyle.spacing
+        Column {
+            id: column
+            width: flick.width
+            spacing: AtlasStyle.spacingLarge
             bottomPadding: AtlasStyle.spacingLarge
 
-            // --- Pinned ---
-            Item {
-                width: parent.width
-                height: pinnedTitle.implicitHeight
-                visible: page.pins.count > 0
-                AtlasLabel {
-                    id: pinnedTitle
-                    text: qsTr("Pinned")
-                    textStyle: AtlasLabel.Heading
-                }
-                TextButton {
-                    anchors.right: parent.right
-                    visible: page.pins.count > page.columns * 3
-                    text: page.pinsExpanded ? qsTr("Show Less") : qsTr("Show All")
-                    onClicked: page.pinsExpanded = !page.pinsExpanded
-                }
-            }
-
-            GridView {
-                id: pinGrid
-
-                readonly property int rows: Math.ceil(count / page.columns)
+            // --- Pinned: one quiet row of icons ---
+            ListView {
+                id: pinList
 
                 width: parent.width
-                height: page.tileSize * 0.85 * Math.min(rows, page.pinsExpanded ? rows : 3)
+                height: page.pinCell
                 visible: count > 0
-                interactive: false
-                clip: true
+                orientation: ListView.Horizontal
                 model: page.pins
-                cellWidth: page.tileSize
-                cellHeight: page.tileSize * 0.85
                 currentIndex: -1
                 keyNavigationEnabled: true
                 highlightMoveDuration: 0
+                boundsBehavior: Flickable.StopAtBounds
+                clip: true
                 activeFocusOnTab: true
                 Accessible.role: Accessible.List
                 Accessible.name: qsTr("Pinned")
+                // Centred while the pins fit; scrolls when they don't.
+                leftMargin: Math.max(0, (width - count * page.pinCell) / 2)
 
-                onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
-                // Keep the current tile shown when it is past the third row.
-                onCurrentIndexChanged: if (currentIndex >= page.columns * 3) page.pinsExpanded = true
+                onActiveFocusChanged: if (activeFocus) {
+                    if (currentIndex < 0 && count > 0) {
+                        currentIndex = 0
+                    }
+                    flick.show(pinList)
+                }
 
                 delegate: LauncherAppTile {
-                    id: tile
-                    width: GridView.view.cellWidth
-                    height: GridView.view.cellHeight
-                    current: GridView.isCurrentItem && GridView.view.activeFocus
-                    focus: GridView.isCurrentItem
+                    id: pin
+                    width: page.pinCell
+                    height: page.pinCell
+                    showLabel: false
+                    iconSize: Kirigami.Units.iconSizes.large
+                    current: ListView.isCurrentItem && ListView.view.activeFocus
+                    focus: ListView.isCurrentItem
                     onClicked: page.backend.activate(1, rowId)
-                    onMenuRequested: (x, y) => page.menu.openFor(1, rowId, tile, x, y, index, page.pins.count)
+                    onMenuRequested: (x, y) => page.menu.openFor(1, rowId, pin, x, y, index, page.pins.count)
                     onDropped: (id, at) => page.backend.movePin(id, at)
                 }
 
@@ -155,21 +230,24 @@ FocusScope {
                 }
                 Keys.onReturnPressed: if (currentIndex >= 0) page.backend.activate(1, currentId())
                 Keys.onEnterPressed: if (currentIndex >= 0) page.backend.activate(1, currentId())
+                Keys.onUpPressed: page.backToField()
+                Keys.onDownPressed: {
+                    if (page.showRecent && chips.children.length > 1) {
+                        chips.children[0].forceActiveFocus(Qt.TabFocusReason)
+                    } else {
+                        page.focusSection(0, true)
+                    }
+                }
                 Keys.onMenuPressed: if (currentItem) page.menu.openFor(1, currentId(), currentItem, currentItem.width / 2, currentItem.height / 2, currentIndex, count)
                 Keys.onPressed: (event) => {
                     const alt = (event.modifiers & Qt.AltModifier) && (event.modifiers & Qt.ShiftModifier)
                     if (alt && event.key === Qt.Key_Left && currentIndex > 0) {
-                        const id = currentId()
-                        page.backend.movePin(id, currentIndex - 1)
+                        page.backend.movePin(currentId(), currentIndex - 1)
                         currentIndex -= 1
                         event.accepted = true
                     } else if (alt && event.key === Qt.Key_Right && currentIndex < count - 1) {
-                        const id = currentId()
-                        page.backend.movePin(id, currentIndex + 1)
+                        page.backend.movePin(currentId(), currentIndex + 1)
                         currentIndex += 1
-                        event.accepted = true
-                    } else if (event.key === Qt.Key_Up && currentIndex < page.columns) {
-                        page.backToField()
                         event.accepted = true
                     } else if (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier) && currentItem) {
                         page.menu.openFor(1, currentId(), currentItem, currentItem.width / 2, currentItem.height / 2, currentIndex, count)
@@ -178,133 +256,105 @@ FocusScope {
                 }
             }
 
-            // --- Recent ---
-            Item {
-                width: parent.width
-                height: recentTitle.implicitHeight
-                visible: page.showRecent
-                AtlasLabel {
-                    id: recentTitle
-                    text: qsTr("Recent")
-                    textStyle: AtlasLabel.Heading
-                }
-                TextButton {
-                    anchors.right: parent.right
-                    visible: page.recentApps.count > 3 || (page.showRecentFiles && page.recentFiles.count > 3)
-                    text: page.recentExpanded ? qsTr("Less") : qsTr("More")
-                    onClicked: page.recentExpanded = !page.recentExpanded
-                }
-            }
+            // --- Recent: small chips ---
+            Flow {
+                id: chips
 
-            Row {
                 width: parent.width
                 visible: page.showRecent
+                spacing: AtlasStyle.spacing
+                Accessible.role: Accessible.Grouping
+                Accessible.name: qsTr("Recent")
 
-                ListView {
-                    id: recentAppList
-                    width: page.showRecentFiles ? parent.width / 2 : parent.width
-                    height: contentHeight
-                    visible: count > 0
-                    interactive: false
+                Repeater {
                     model: page.recentApps
-                    currentIndex: -1
-                    keyNavigationEnabled: true
-                    highlightMoveDuration: 0
-                    activeFocusOnTab: true
-                    Accessible.role: Accessible.List
-                    Accessible.name: qsTr("Recent Apps")
-                    onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
-
-                    delegate: LauncherResultRow {
+                    delegate: LauncherChip {
                         id: recentApp
-                        width: ListView.view.width
-                        visible: page.recentExpanded || index < 3
-                        height: visible ? implicitHeight : 0
-                        showKind: false
-                        current: ListView.isCurrentItem && ListView.view.activeFocus
-                        focus: ListView.isCurrentItem
+                        visible: index < page.recentShown
                         onClicked: page.backend.activate(3, rowId)
                         onMenuRequested: (x, y) => page.menu.openFor(3, rowId, recentApp, x, y)
+                        onActiveFocusChanged: if (activeFocus) flick.show(recentApp)
+                        Keys.onUpPressed: pinList.count > 0 ? pinList.forceActiveFocus(Qt.TabFocusReason) : page.backToField()
+                        Keys.onDownPressed: page.focusSection(0, true)
                     }
-                    Keys.onReturnPressed: page.backend.activate(3, model.idAt(currentIndex))
-                    Keys.onEnterPressed: page.backend.activate(3, model.idAt(currentIndex))
-                    Keys.onRightPressed: if (recentFileList.visible) recentFileList.forceActiveFocus(Qt.TabFocusReason)
-                    Keys.onMenuPressed: if (currentItem) page.menu.openFor(3, model.idAt(currentIndex), currentItem, 0, 0)
-                    // Past the third row while collapsed: show the rest.
-                    onCurrentIndexChanged: if (currentIndex >= 3) page.recentExpanded = true
                 }
-
-                ListView {
-                    id: recentFileList
-                    width: recentAppList.visible ? parent.width / 2 : parent.width
-                    height: contentHeight
-                    visible: page.showRecentFiles
-                    interactive: false
-                    model: page.recentFiles
-                    currentIndex: -1
-                    keyNavigationEnabled: true
-                    highlightMoveDuration: 0
-                    activeFocusOnTab: true
-                    Accessible.role: Accessible.List
-                    Accessible.name: qsTr("Recent Files")
-                    onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
-
-                    delegate: LauncherResultRow {
+                Repeater {
+                    model: page.showRecentFiles ? page.recentFiles : null
+                    delegate: LauncherChip {
                         id: recentFile
-                        width: ListView.view.width
-                        visible: page.recentExpanded || index < 3
-                        height: visible ? implicitHeight : 0
-                        showKind: false
-                        current: ListView.isCurrentItem && ListView.view.activeFocus
-                        focus: ListView.isCurrentItem
+                        visible: index < page.recentShown
                         onClicked: page.backend.activate(4, rowId)
                         onMenuRequested: (x, y) => page.menu.openFor(4, rowId, recentFile, x, y)
+                        onActiveFocusChanged: if (activeFocus) flick.show(recentFile)
+                        Keys.onUpPressed: pinList.count > 0 ? pinList.forceActiveFocus(Qt.TabFocusReason) : page.backToField()
+                        Keys.onDownPressed: page.focusSection(0, true)
                     }
-                    Keys.onReturnPressed: page.backend.activate(4, model.idAt(currentIndex))
-                    Keys.onEnterPressed: page.backend.activate(4, model.idAt(currentIndex))
-                    Keys.onLeftPressed: if (recentAppList.visible) recentAppList.forceActiveFocus(Qt.TabFocusReason)
-                    Keys.onMenuPressed: if (currentItem) page.menu.openFor(4, model.idAt(currentIndex), currentItem, 0, 0)
-                    onCurrentIndexChanged: if (currentIndex >= 3) page.recentExpanded = true
                 }
             }
 
-            AtlasLabel {
-                topPadding: AtlasStyle.spacingLarge
-                text: qsTr("All Apps")
-                textStyle: AtlasLabel.Heading
+            // --- Apps: grouped grid, or A–Z ---
+            Item {
+                width: parent.width
+                height: Math.max(appsTitle.implicitHeight, viewSwitch.implicitHeight)
+
+                AtlasLabel {
+                    id: appsTitle
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Apps")
+                    textStyle: AtlasLabel.Heading
+                }
+                AtlasSegmentedControl {
+                    id: viewSwitch
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    model: [
+                        { text: qsTr("Categories"), symbol: Symbols.Category },
+                        { text: qsTr("A–Z"), symbol: Symbols.SortByAlpha }
+                    ]
+                    currentIndex: page.appView
+                    onActivated: (index) => viewState.appView = index
+                    Accessible.name: qsTr("Show apps")
+                }
             }
-        }
 
-        section.property: "section"
-        section.criteria: ViewSection.FullString
-        section.delegate: AtlasButton {
-            required property string section
-            variant: AtlasButton.Ghost
-            text: section
-            Accessible.name: qsTr("%1, jump to letter").arg(section)
-            onClicked: letters.open(section)
-        }
+            Column {
+                id: appsColumn
+                width: parent.width
+                spacing: AtlasStyle.spacingLarge
 
-        delegate: LauncherResultRow {
-            id: appRow
-            width: ListView.view.width
-            showKind: false
-            current: ListView.isCurrentItem && ListView.view.activeFocus
-            focus: ListView.isCurrentItem
-            onClicked: page.backend.activate(2, rowId)
-            onMenuRequested: (x, y) => page.menu.openFor(2, rowId, appRow, x, y)
-        }
+                Repeater {
+                    id: sectionRepeater
+                    model: page.sections
 
-        Keys.onReturnPressed: if (currentIndex >= 0) page.backend.activate(2, model.idAt(currentIndex))
-        Keys.onEnterPressed: if (currentIndex >= 0) page.backend.activate(2, model.idAt(currentIndex))
-        Keys.onMenuPressed: if (currentItem) page.menu.openFor(2, model.idAt(currentIndex), currentItem, 0, 0)
-        Keys.onPressed: (event) => {
-            if (event.key === Qt.Key_Up && currentIndex <= 0) {
-                page.backToField()
-                event.accepted = true
-            } else if (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier) && currentItem) {
-                page.menu.openFor(2, model.idAt(currentIndex), currentItem, 0, 0)
-                event.accepted = true
+                    delegate: LauncherAppSection {
+                        id: section
+                        required property int index
+                        required property var modelData
+
+                        width: appsColumn.width
+                        title: modelData.title
+                        items: modelData.items
+                        columns: page.columns
+                        cell: page.cell
+                        letterHeader: page.appView === 1
+                        onHeaderClicked: letters.open(modelData.key)
+                        onActivated: (id) => page.backend.activate(2, id)
+                        onMenuRequested: (id, item, x, y) => page.menu.openFor(2, id, item, x, y)
+                        onFocusedItem: (item) => flick.show(item)
+                        onLeaveUp: {
+                            if (!page.focusSection(index - 1, false)) {
+                                if (page.showRecent && chips.children.length > 1) {
+                                    chips.children[0].forceActiveFocus(Qt.BacktabFocusReason)
+                                } else if (pinList.count > 0) {
+                                    pinList.forceActiveFocus(Qt.BacktabFocusReason)
+                                } else {
+                                    page.backToField()
+                                }
+                            }
+                        }
+                        onLeaveDown: page.focusSection(index + 1, true)
+                    }
+                }
             }
         }
     }
@@ -314,6 +364,6 @@ FocusScope {
         anchors.fill: parent
         letters: page.backend.letters
         onChosen: (letter) => page.jumpTo(letter)
-        onClosed: list.forceActiveFocus(Qt.TabFocusReason)
+        onClosed: page.focusSection(0, true)
     }
 }

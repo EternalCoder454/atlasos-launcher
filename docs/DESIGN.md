@@ -17,36 +17,47 @@ One launcher replaces two things on AtlasOS:
 | KRunner (Alt+Space; already retired by `build.sh`, its search lives in Andromeda) | Search mode of the launcher, opened by Alt+Space, Alt+F2 or Meta+S |
 | Baloo file search (indexer removed from AtlasOS) | AtlasOS Explorer's file index over D-Bus |
 
-**Start mode**, the Windows 11 Start menu: a blurred, rounded Atlas.Ui panel
-above the dock, with the search field focused. One scrolling page:
+**Start mode**, search first (Spotlight's flow, with the browsing Windows
+does best), in a blurred, rounded Atlas.Ui panel above the dock. The
+research behind it (2026-10-06): people launch by Meta, two or three letters
+and Enter; they hate ads and "Recommended" blocks, web results ahead of their
+own, a top hit that changes under Enter, and a launcher that loses its app
+grid (Launchpad's removal); they praise one scrollable "All" view, actions
+on results and sections they can hide. So, top to bottom:
 
-1. Pinned: a grid of 6 columns, 3 rows shown, "Show All" to expand.
-   Drag to reorder, or reorder from the keyboard with Alt+Shift+arrows or
-   the context menu (Move to Front, Move Left, Move Right).
-2. Recent: up to 6 recent files and recently used or installed apps, in two
-   columns, with "More" for the rest. Can be turned off (`ShowRecent`).
-3. All Apps: A to Z with letter headers. A header opens the letter grid
-   (A–Z, then #). Letters that have no apps are dimmed, and choosing a letter
-   jumps to it.
-4. Footer: the user tile (avatar and name, which opens Settings' Users page)
-   on the left. On the right, Settings and Files buttons and the power
-   button, whose menu has Lock, Sleep, Hibernate (when available), Switch
-   User (when available), Log Out, Restart and Shut Down.
+1. The search field, a pill, focused, with the account button (avatar; opens
+   Settings' Users page) and the power button (Lock, Sleep, Hibernate when
+   available, Switch User when available, Log Out, Restart, Shut Down)
+   beside it. No footer.
+2. Pinned: one row of icons without labels (the name is the tooltip and the
+   accessible name), centred, scrolling sideways past eight. Drag to reorder,
+   or Alt+Shift+arrows, or the context menu (Move to Front, Move Left, Move
+   Right).
+3. Recent: up to 3 apps and 3 files as small chips (icon and name, the path
+   in the tooltip). Can be turned off (`ShowRecent`, `ShowRecentFiles`).
+4. Apps: every app as a labelled grid, grouped by kind (Internet, Office,
+   Music & Video, Graphics, Development, Games, Education, System,
+   Utilities, Other; from the desktop file's `Categories`,
+   `catalog::group_of`) or A–Z, switched beside the "Apps" heading and
+   remembered in `state.conf`. In A–Z the letter headings open the letter
+   grid (A–Z, then #; letters with no apps dimmed).
 
 Typing turns the page into **one ranked list**: apps, AtlasOS Settings pages
 and settings, files and folders, calculator and unit conversion, commands,
 web search, and the results of every enabled KRunner plugin. Each row shows
 its kind on the right ("App", "Setting", "Folder"...). The first row is the
-top hit, drawn larger. Start mode also shows a detail pane on the right for
-the selected row: icon, name, kind, path, and its actions.
+best match, a card with its quick actions under the name: Open, Pin or
+Unpin (apps), Show in Folder and Copy Path (files). While typing, the panel
+shrinks to fit its results, growing up from the dock.
 
 **Search mode** (Alt+Space, Alt+F2, Meta+S): the same search, compact, at the
 top third of the active screen like Spotlight: a field that grows downward
-into at most 8 rows. No detail pane: actions are in the context menu.
+into at most 8 rows, the best match's card included.
 
 **Everywhere:** Enter runs the highlighted row (the top hit unless the user
 moved). The arrow keys move within a region and Tab moves between regions
-(field, sections or results, detail actions, footer). Typing a printable
+(field, account and power, pinned, recent, each app section; or the
+results). Typing a printable
 character anywhere sends it to the field. Esc clears the field, or closes
 when it is empty. Menu, Shift+F10 or a right click opens the context menu:
 
@@ -178,6 +189,7 @@ KGlobalAccel binding) still opens Search.
 | `$XDG_CONFIG_HOME/atlas-launcher/launcher.conf` | Options, written by Settings' "Launcher & Search" page with KConfig::Notify and followed live with KConfigWatcher | KConfig ini (below) |
 | `$XDG_CONFIG_HOME/atlas-launcher/pinned.list` | Pinned apps in order | One desktop file id per line (`org.kde.dolphin.desktop`), or `preferred://browser`, `preferred://filemanager`, `preferred://terminal`; `#` comments |
 | `/etc/xdg/atlas-launcher/pinned.list` | The image's default pins | Same |
+| `$XDG_CONFIG_HOME/atlas-launcher/state.conf` | The Start page's app view (`[Start] appView`: 0 by kind, 1 A–Z), written by the panel | KConfig-style ini (Qt's Settings) |
 | `$XDG_STATE_HOME/atlas-launcher/usage.tsv` | What the user ran, for ranking. Cleared by ClearHistory or by deleting it | `query-prefix TAB result-id TAB count TAB last-used-unix`, at most 2,000 lines |
 
 `launcher.conf`:
@@ -563,7 +575,7 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 | A recent file is on a hung network mount | Only the scan worker waits on its `stat` (the GUI, search and writes never do); recent files show the last list until it returns. At logout, shutdown stops waiting after 2 s |
 | A pinned app is uninstalled | Hidden, but kept in `pinned.list`, so a reinstall brings it back |
 | A launch fails | A notification with the job's error |
-| A power or session call fails | An inline message in the panel's footer |
+| A power or session call fails | An inline message at the bottom of the panel |
 | No layer-shell (not KWin, or X11) | A frameless always-on-top window, centred; logged |
 | Screens change while open | The panel hides |
 | The button plasmoid loads before the service | Its D-Bus call activates the service |
@@ -645,10 +657,10 @@ the VM.
 | Andromeda | Launcher |
 |---|---|
 | Favourites grid, drag to reorder | Pinned |
-| All apps, list or grid | All Apps A–Z with letter grid (no category view) |
+| All apps, list or grid | Apps grid by kind or A–Z, with the letter grid |
 | Recent apps and documents | Recent |
 | KRunner search (all enabled plugins) | Search |
-| Avatar, name, settings, lock, power | Footer |
+| Avatar, name, settings, lock, power | The account and power buttons beside the field |
 | Right-click: desktop actions, Add to Favourites, Edit Application, Uninstall (Discover) | Context menu |
 | Drag an app to the desktop or dock | Drag out as `text/uri-list` of its desktop file (F phase checks drag from a layer surface) |
 | "Pin to Task Manager" | Through the dock button. The open question for the F phase: Plasma offers no API outside the shell, and `evaluateScript` with a validated id is the candidate |

@@ -6,9 +6,11 @@ import Atlas.Ui
 // Meta, the dock button or Alt+Space (docs/DESIGN.md, "Form"). Panel (C++)
 // places it and maps it; this file draws it.
 //
-// Start mode: the Start page (pinned, recent, all apps) until something is
-// typed, then the ranked results with a detail pane. Search mode: the field
-// and the results only.
+// Start mode: search first. A pill-shaped field with the account and power
+// buttons beside it, over the Start page (a pinned row, recent chips, the
+// apps by kind or A–Z) until something is typed, then the ranked results,
+// the best match a card with its actions. Search mode: the field and the
+// results only.
 Window {
     id: root
 
@@ -26,11 +28,31 @@ Window {
     property var panel: null
 
     // Read by Panel before each show.
-    readonly property size startSize: Qt.size(Kirigami.Units.gridUnit * 40, Kirigami.Units.gridUnit * 40)
+    readonly property size startSize: Qt.size(Kirigami.Units.gridUnit * 36, Kirigami.Units.gridUnit * 36)
     readonly property size searchSize: Qt.size(Kirigami.Units.gridUnit * 38, Kirigami.Units.gridUnit * 26)
     readonly property real cornerRadius: AtlasStyle.radiusLarge * 2
     // The transparency switch: no blur and an opaque panel when it is off.
     readonly property bool blurEnabled: Appearance.effective
+
+    // While typing, the panel fits its results, as Spotlight does: anchored
+    // to its bottom edge above the dock (Start) or its top edge (Search), it
+    // grows and shrinks from the other one. Panel (C++) sets the full size
+    // before each show; the blur follows the size there too.
+    readonly property real fittedHeight: Math.ceil(AtlasStyle.spacingXLarge * 2 + field.height + AtlasStyle.spacingLarge
+        + Math.max(resultList.contentHeight, Kirigami.Units.gridUnit * 4))
+    function fit() {
+        if (!shown) {
+            return
+        }
+        const full = startMode ? startSize.height : searchSize.height
+        const h = searching ? Math.min(full, fittedHeight) : full
+        if (Math.abs(root.height - h) >= 1) {
+            root.height = h
+        }
+    }
+    onFittedHeightChanged: Qt.callLater(root.fit)
+    onSearchingChanged: Qt.callLater(root.fit)
+    onShownChanged: Qt.callLater(root.fit)
 
     readonly property bool startMode: panel !== null && panel.mode === "start"
     readonly property bool searching: field.text.length > 0
@@ -190,12 +212,46 @@ Window {
             }
         }
 
+        // The search pill, and in Start mode the account and power buttons.
+        Item {
+            id: header
+            anchors.top: parent.top
+            width: parent.width
+            height: field.height
+
+            Row {
+                id: headerButtons
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.startMode
+                spacing: AtlasStyle.spacingSmall
+
+                LauncherAccountButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    actions: root.actions
+                }
+                LauncherPowerButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    actions: root.actions
+                }
+            }
+        }
+
         SearchField {
             id: field
 
             anchors.top: parent.top
-            width: parent.width
+            anchors.left: parent.left
+            width: root.startMode ? parent.width - headerButtons.width - AtlasStyle.spacing : parent.width
+            implicitHeight: Kirigami.Units.gridUnit * 2.6
+            font.pointSize: AtlasStyle.fontSizeHeading
             focus: true
+            background: Rectangle {
+                radius: AtlasStyle.radiusPill
+                color: Qt.alpha(Kirigami.Theme.textColor, 0.06)
+                border.width: 1
+                border.color: field.activeFocus ? AtlasStyle.focus : AtlasStyle.separator
+            }
             placeholderText: qsTr("Search apps, settings and files")
             // A huge paste is cut here; the engine reads far less.
             maximumLength: 1024
@@ -232,8 +288,7 @@ Window {
 
             anchors.top: field.bottom
             anchors.topMargin: AtlasStyle.spacingLarge
-            anchors.bottom: footer.visible ? footer.top : parent.bottom
-            anchors.bottomMargin: footer.visible ? AtlasStyle.spacing : 0
+            anchors.bottom: parent.bottom
             width: parent.width
 
             LauncherStartPage {
@@ -256,33 +311,20 @@ Window {
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
                 anchors.left: parent.left
-                width: root.startMode ? parent.width * 0.6 : parent.width
+                width: parent.width
                 visible: root.searching
                 locked: root.needsInteraction
                 model: root.results
                 backend: root.backend
+                actions: root.actions
                 menu: itemMenu
                 onBackToField: root.backToField()
                 onCountChanged: if (root.searching && root.shown) announce.restart()
             }
 
-            LauncherDetailPane {
-                id: detail
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.left: resultList.right
-                anchors.right: parent.right
-                anchors.leftMargin: AtlasStyle.spacing
-                visible: root.startMode && root.searching && resultList.count > 0
-                backend: root.backend
-                actions: root.actions
-                row: resultList.currentItem
-                onOpen: resultList.activateCurrent()
-
-                Connections {
-                    target: root.pins
-                    function onCountChanged() { detail.pinsVersion += 1 }
-                }
+            Connections {
+                target: root.pins
+                function onCountChanged() { resultList.pinsVersion += 1 }
             }
 
             AtlasLabel {
@@ -302,14 +344,6 @@ Window {
                 Accessible.role: Accessible.AlertMessage
                 onVisibleChanged: if (visible) Accessible.announce(text)
             }
-        }
-
-        LauncherFooter {
-            id: footer
-            anchors.bottom: parent.bottom
-            width: parent.width
-            visible: root.startMode
-            actions: root.actions
         }
     }
 

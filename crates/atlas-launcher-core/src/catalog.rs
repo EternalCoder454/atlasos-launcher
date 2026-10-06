@@ -152,6 +152,49 @@ pub struct Catalog {
 /// The A–Z group of a name: its first letter in upper case when that is a
 /// Latin letter (after folding, so "É" is E and "ß" is S), `#` for anything
 /// else: digits, symbols and other scripts.
+/// The Start page's app groups, in the order they are shown. The panel
+/// translates the keys.
+pub const GROUPS: [&str; 10] = [
+    "internet",
+    "office",
+    "media",
+    "graphics",
+    "development",
+    "games",
+    "education",
+    "system",
+    "utilities",
+    "other",
+];
+
+/// The group an app is shown in, from its desktop file's `Categories`
+/// (freedesktop's main categories, first match in GROUPS order wins, so a
+/// browser that is also a "Utility" stays under Internet).
+pub fn group_of(categories: &[String]) -> &'static str {
+    let has = |names: &[&str]| categories.iter().any(|c| names.contains(&c.as_str()));
+    if has(&["Network", "WebBrowser", "Email", "Chat", "InstantMessaging"]) {
+        "internet"
+    } else if has(&["Office", "WordProcessor", "Spreadsheet", "Presentation", "Calendar", "ContactManagement"]) {
+        "office"
+    } else if has(&["AudioVideo", "Audio", "Video", "Music", "Player", "Recorder", "TV"]) {
+        "media"
+    } else if has(&["Graphics", "Photography", "2DGraphics", "3DGraphics", "RasterGraphics", "VectorGraphics", "Viewer"]) {
+        "graphics"
+    } else if has(&["Development", "IDE", "TextEditor", "Debugger", "RevisionControl"]) {
+        "development"
+    } else if has(&["Game"]) {
+        "games"
+    } else if has(&["Education", "Science", "Math"]) {
+        "education"
+    } else if has(&["System", "Settings", "Monitor", "PackageManager", "TerminalEmulator", "FileManager", "Security"]) {
+        "system"
+    } else if has(&["Utility", "Accessibility", "Archiving", "Compression", "Calculator", "Clock"]) {
+        "utilities"
+    } else {
+        "other"
+    }
+}
+
 pub fn letter_of(name: &str) -> char {
     match fold(name).chars().next() {
         Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase(),
@@ -360,6 +403,22 @@ mod tests {
             icon: "icon".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn groups_from_categories() {
+        let g = |cats: &[&str]| group_of(&cats.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        assert_eq!(g(&["Network", "WebBrowser", "Utility"]), "internet");
+        assert_eq!(g(&["Qt", "KDE", "Office", "WordProcessor"]), "office");
+        assert_eq!(g(&["AudioVideo", "Player"]), "media");
+        assert_eq!(g(&["Graphics", "Viewer"]), "graphics");
+        assert_eq!(g(&["Utility", "TextEditor"]), "development");
+        assert_eq!(g(&["Game", "ArcadeGame"]), "games");
+        assert_eq!(g(&["System", "TerminalEmulator"]), "system");
+        assert_eq!(g(&["Utility", "Archiving"]), "utilities");
+        assert_eq!(g(&[]), "other");
+        assert_eq!(g(&["X-Unknown"]), "other");
+        assert!(GROUPS.contains(&g(&["Science"])));
     }
 
     fn search(c: &Catalog, q: &str) -> Vec<ResultItem> {

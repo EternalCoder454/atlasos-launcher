@@ -88,10 +88,12 @@ qt_add_qml_module(atlas-launcher-app
         qml/LauncherStartPage.qml
         qml/LauncherAppTile.qml
         qml/LauncherItemMenu.qml
-        qml/LauncherFooter.qml
+        qml/LauncherChip.qml
+        qml/LauncherAppSection.qml
+        qml/LauncherPowerButton.qml
+        qml/LauncherAccountButton.qml
         qml/LauncherLetterGrid.qml
         qml/LauncherItemIcon.qml
-        qml/LauncherDetailPane.qml
 )
 
 target_link_libraries(atlas-launcher-app PRIVATE

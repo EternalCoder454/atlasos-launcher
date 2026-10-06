@@ -3,7 +3,9 @@ import org.kde.kirigami as Kirigami
 import Atlas.Ui
 
 // One row of a list: icon, title and subtitle, and its kind on the right.
-// The top hit (`large`) is drawn taller. A command line is elided in the
+// The top hit (`large`) is the best-match card: taller, with its quick
+// actions in a row under the name (Open, Pin, Show in Folder, Copy Path)
+// when the list gives it `backend` and `actions`. A command line is elided in the
 // middle, with the whole line in the tooltip and the accessible description.
 Item {
     id: row
@@ -15,10 +17,31 @@ Item {
     property bool current: false
     property bool large: false
     property bool showKind: true
+    // For the best-match card's actions; null elsewhere.
+    property var backend: null
+    property var actions: null
+    // Bumped by the list when the pins change, so Pin/Unpin follows.
+    property int pinsVersion: 0
 
     readonly property string rowId: model.id
     readonly property bool commandLine: rowId.startsWith("run:") || rowId.startsWith("term:")
     readonly property string kindLabel: kindText(model.kind)
+    readonly property bool showActions: large && backend !== null && actions !== null
+    readonly property string desktopId: showActions ? backend.desktopIdOf(rowId) : ""
+    readonly property string uri: showActions ? backend.uriOf(rowId) : ""
+    readonly property bool pinned: pinsVersion >= 0 && desktopId.length > 0 && backend.isPinned(rowId)
+    readonly property bool pinnable: pinsVersion >= 0 && desktopId.length > 0 && backend.canPin(rowId)
+
+    // The path for Copy Path, without NULs; the URI as is if its escapes
+    // are malformed.
+    function localPath(fileUri) {
+        const path = fileUri.replace(/^file:\/\//, "")
+        try {
+            return decodeURIComponent(path).replace(/\u0000/g, "")
+        } catch (e) {
+            return path
+        }
+    }
 
     signal clicked()
     signal menuRequested(real x, real y)
@@ -38,7 +61,7 @@ Item {
         }
     }
 
-    implicitHeight: large ? Kirigami.Units.gridUnit * 3.5 : Math.max(AtlasStyle.rowHeight, Kirigami.Units.gridUnit * 2.25)
+    implicitHeight: large ? Kirigami.Units.gridUnit * (showActions && quickActions.visibleCount > 0 ? 5.5 : 3.5) : Math.max(AtlasStyle.rowHeight, Kirigami.Units.gridUnit * 2.25)
     implicitWidth: ListView.view ? ListView.view.width : Kirigami.Units.gridUnit * 20
 
     Accessible.role: Accessible.ListItem
@@ -52,8 +75,10 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: AtlasStyle.spacingXSmall
         anchors.rightMargin: AtlasStyle.spacingXSmall
-        radius: AtlasStyle.radius
-        color: row.current ? AtlasStyle.selection : (mouse.containsMouse ? AtlasStyle.hover : "transparent")
+        radius: row.large ? AtlasStyle.radiusLarge : AtlasStyle.radius
+        color: row.current ? AtlasStyle.selection : (mouse.containsMouse ? AtlasStyle.hover : (row.large ? Qt.alpha(Kirigami.Theme.textColor, 0.04) : "transparent"))
+        border.width: row.large ? 1 : 0
+        border.color: AtlasStyle.separator
 
         AtlasFocusRing {
             anchors.fill: parent
@@ -63,7 +88,11 @@ Item {
     }
 
     Row {
-        anchors.fill: parent
+        id: mainRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        height: row.large ? Kirigami.Units.gridUnit * 3.5 : parent.height
         anchors.leftMargin: AtlasStyle.spacingLarge
         anchors.rightMargin: AtlasStyle.spacingLarge
         spacing: AtlasStyle.spacingLarge
@@ -122,6 +151,48 @@ Item {
             } else {
                 row.clicked()
             }
+        }
+    }
+
+    // The best match's quick actions, above the row's MouseArea.
+    Row {
+        id: quickActions
+
+        readonly property int visibleCount: (openButton.visible ? 1 : 0) + (pinButton.visible ? 1 : 0) + (folderButton.visible ? 1 : 0) + (copyButton.visible ? 1 : 0)
+
+        anchors.top: mainRow.bottom
+        anchors.left: parent.left
+        anchors.leftMargin: AtlasStyle.spacingLarge + Kirigami.Units.iconSizes.large + AtlasStyle.spacingLarge
+        visible: row.showActions
+        spacing: AtlasStyle.spacingSmall
+
+        AtlasButton {
+            id: openButton
+            variant: AtlasButton.Prominent
+            text: qsTr("Open")
+            symbol: Symbols.OpenInNew
+            onClicked: row.clicked()
+        }
+        AtlasButton {
+            id: pinButton
+            visible: row.pinned || row.pinnable
+            text: row.pinned ? qsTr("Unpin") : qsTr("Pin")
+            symbol: Symbols.PushPin
+            onClicked: row.pinned ? row.backend.unpin(row.rowId) : row.backend.pin(row.rowId)
+        }
+        AtlasButton {
+            id: folderButton
+            visible: row.uri.length > 0
+            text: qsTr("Show in Folder")
+            symbol: Symbols.FolderOpen
+            onClicked: row.actions.openContainingFolder(row.uri)
+        }
+        AtlasButton {
+            id: copyButton
+            visible: row.uri.length > 0
+            text: qsTr("Copy Path")
+            symbol: Symbols.ContentCopy
+            onClicked: row.actions.copyText(row.localPath(row.uri))
         }
     }
 

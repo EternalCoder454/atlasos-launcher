@@ -204,6 +204,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "uriOf"]
         fn uri_of(self: &Backend, id: &QString) -> QString;
+        /// The Start page group of an app row (a key of
+        /// `catalog::GROUPS`: "internet", "office"...), or "" for anything else.
+        #[qinvokable]
+        #[cxx_name = "categoryOf"]
+        fn category_of(self: &Backend, id: &QString) -> QString;
         /// An app row's desktop actions: a list of maps with `id`, `name`
         /// and `icon`, empty for anything else.
         #[qinvokable]
@@ -882,6 +887,14 @@ impl qobject::Backend {
         self.state
             .app_of(&id.to_string())
             .map_or_else(QString::default, |a| QString::from(a.desktop_id.as_str()))
+    }
+
+    pub fn category_of(&self, id: &QString) -> QString {
+        self.state
+            .app_of(&id.to_string())
+            .map_or_else(QString::default, |a| {
+                QString::from(atlas_launcher_core::catalog::group_of(&a.categories))
+            })
     }
 
     pub fn flatpak_id_of(&self, id: &QString) -> QString {

@@ -11,6 +11,10 @@ ListView {
 
     required property var backend
     required property var menu
+    // For the best-match card's quick actions (LauncherResultRow).
+    property var actions: null
+    // Bumped when the pins change, so the card's Pin/Unpin follows.
+    property int pinsVersion: 0
 
     // The user moved the highlight in this query (else Enter runs the top hit).
     property bool moved: false
@@ -119,6 +123,9 @@ ListView {
         width: ListView.view.width
         current: ListView.isCurrentItem
         large: index === 0
+        backend: list.backend
+        actions: list.actions
+        pinsVersion: list.pinsVersion
         focus: ListView.isCurrentItem
         onHoveredRow: {
             list.currentIndex = index
