@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           atlas-launcher
-Version:        0.1.1
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        AtlasOS Launcher, the Start menu and search of AtlasOS
 License:        MIT
@@ -109,6 +109,13 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.la
 %config(noreplace) %{_sysconfdir}/xdg/atlas-launcher/pinned.list
 
 %changelog
+* Tue Oct 06 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.2.0-1
+- Start is search first: a pill field with the account and power buttons, a
+  row of pinned icons, recent chips and the apps by kind or A-Z; the top
+  result is a best-match card with its actions; the panel fits its results.
+- The dock button opens the launcher from a click and from Meta (through
+  plasmashell), anchors the panel above it and shows when it is open.
+
 * Mon Oct 05 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.1.1-1
 - Install the default pins under /etc/xdg
 

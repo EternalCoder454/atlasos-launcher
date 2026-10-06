@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-launcher"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "atlas-framework-ui",
  "atlas-launcher-core",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-launcher-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "libc",
  "log",
