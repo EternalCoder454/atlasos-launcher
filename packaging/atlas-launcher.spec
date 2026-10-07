@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           atlas-launcher
-Version:        0.2.2
+Version:        0.2.3
 Release:        1%{?dist}
 Summary:        AtlasOS Launcher, the Start menu and search of AtlasOS
 License:        MIT
@@ -109,6 +109,13 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.la
 %config(noreplace) %{_sysconfdir}/xdg/atlas-launcher/pinned.list
 
 %changelog
+* Tue Oct 06 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.2.3-1
+- Lighter and faster, with nothing on screen changed: tiles out of view
+  draw nothing, and menus, the letter grid and each tile's drag and tooltip
+  parts are made when first used. Memory after use is about 44% lower, the
+  first open about three times faster, and memory no longer grows with the
+  number of installed apps.
+
 * Tue Oct 06 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.2.2-1
 - Start slides up out of the dock instead of popping in at the middle.
 - The panel keeps one height while typing, and the first letter no longer
