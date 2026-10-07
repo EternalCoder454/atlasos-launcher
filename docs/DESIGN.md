@@ -458,7 +458,11 @@ so stale ones are dropped.
     xbel file's mtime, which is checked when the panel opens (inotify, which
     wakes only on change);
   - one single-shot timer 60 s after a hide trims memory
-    (`QQuickWindow::releaseResources`, `malloc_trim`).
+    (`QQuickWindow::releaseResources`, `malloc_trim`);
+  - the Start page is already back at its top (reset at the hide), and of
+    the app grid only the tiles within a row of the view are made; the
+    others keep their place, focus and accessible name. The context menus,
+    the power menu and the letter grid are made on first use.
 - **On open:**
   - the recent files and the `PATH` cache refresh if their mtimes changed
     (one `stat` each);

@@ -38,18 +38,24 @@ Item {
         active: tile.live
         sourceComponent: Item {
             Rectangle {
+                id: highlight
                 anchors.fill: parent
                 anchors.margins: AtlasStyle.spacingXSmall
                 radius: AtlasStyle.radius
                 color: tile.current || (dropTarget.item as DropArea)?.containsDrag ? AtlasStyle.selection
                      : (drag.containsMouse ? AtlasStyle.hover : "transparent")
 
-                AtlasFocusRing {
+                // The focus ring, made when the tile takes the focus and kept
+                // until it has faded out.
+                Loader {
                     anchors.fill: parent
-                    radius: parent.radius + gap
-                    // Bound once made, so a ring made for a tile that
-                    // already has the focus still fades in.
-                    Component.onCompleted: shown = Qt.binding(() => tile.activeFocus)
+                    active: tile.activeFocus || ((item as Item)?.visible ?? false)
+                    sourceComponent: AtlasFocusRing {
+                        radius: highlight.radius + gap
+                        // Bound once made, so it fades in as it does when
+                        // the focus comes to a tile that has its ring.
+                        Component.onCompleted: shown = Qt.binding(() => tile.activeFocus)
+                    }
                 }
             }
 
