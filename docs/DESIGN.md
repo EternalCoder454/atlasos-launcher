@@ -47,8 +47,13 @@ and settings, files and folders, calculator and unit conversion, commands,
 web search, and the results of every enabled KRunner plugin. Each row shows
 its kind on the right ("App", "Setting", "Folder"...). The first row is the
 best match, a card with its quick actions under the name: Open, Pin or
-Unpin (apps), Show in Folder and Copy Path (files). While typing, the panel
-shrinks to fit its results, growing up from the dock.
+Unpin (apps), Show in Folder and Copy Path (files). The panel keeps its size
+while typing, and the page that was showing stays until the first answer to
+what is typed arrives, so nothing flickers between keystrokes ("No results"
+only for an answer that is empty). It slides up out of the dock as it opens
+(Search fades in place); the Start page fades at the edges where it scrolls,
+and the wheel scrolls through Kirigami's WheelHandler (even steps for a
+notched wheel, pixels for a smooth one).
 
 **Search mode** (Alt+Space, Alt+F2, Meta+S): the same search, compact, at the
 top third of the active screen like Spotlight: a field that grows downward

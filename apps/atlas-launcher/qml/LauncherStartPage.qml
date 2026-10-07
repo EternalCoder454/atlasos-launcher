@@ -167,6 +167,14 @@ FocusScope {
         boundsBehavior: Flickable.StopAtBounds
         T.ScrollBar.vertical: AtlasScrollBar {}
 
+        // Kirigami's wheel handling: even steps for a notched wheel, pixel
+        // scrolling for a free-spinning or high-resolution one (both of the
+        // G502's modes), and no flick inertia fighting the wheel.
+        Kirigami.WheelHandler {
+            target: flick
+            filterMouseEvents: true
+        }
+
         // Keeps the focused item in view.
         function show(item) {
             if (!item) {
@@ -358,6 +366,35 @@ FocusScope {
                 }
             }
         }
+    }
+
+    // Soft edges where the page scrolls on, so a row cut by the panel's edge
+    // fades out instead of peeking half-drawn.
+    component EdgeFade: Rectangle {
+        property bool atTop: false
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Kirigami.Units.gridUnit * 2
+        gradient: Gradient {
+            GradientStop {
+                position: 0
+                color: Qt.alpha(AtlasStyle.floatingBackground, 0)
+            }
+            GradientStop {
+                position: 1
+                color: AtlasStyle.floatingBackground
+            }
+        }
+        rotation: atTop ? 180 : 0
+    }
+    EdgeFade {
+        anchors.bottom: flick.bottom
+        visible: flick.contentY + flick.height < flick.contentHeight - 1
+    }
+    EdgeFade {
+        anchors.top: flick.top
+        atTop: true
+        visible: flick.contentY > 1
     }
 
     LauncherLetterGrid {
