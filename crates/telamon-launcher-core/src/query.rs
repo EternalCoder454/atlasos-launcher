@@ -205,6 +205,17 @@ impl ResultSet {
         }
     }
 
+    /// Lets `f` change the rows in place (a renamed app's title): no row is
+    /// added, removed or moved, so nothing the user is looking at jumps.
+    /// True when `f` changed any.
+    pub fn update_rows(&mut self, mut f: impl FnMut(&mut ResultItem) -> bool) -> bool {
+        let mut changed = false;
+        for (_, it) in &mut self.rows {
+            changed |= f(it);
+        }
+        changed
+    }
+
     /// Merges a late batch from `source`, replacing that source's earlier
     /// rows. The top row and the row with id `selected` keep their places;
     /// everything else is re-ranked around them. A late row whose id another

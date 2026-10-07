@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use telamon_launcher_core::catalog::{AppEntry, Catalog, app_item, letter_of};
+use telamon_launcher_core::names::Names;
 use telamon_launcher_core::result::{Action, Kind, ResultItem};
 
 /// The lists the panel shows, each an `ItemModel`.
@@ -95,6 +96,26 @@ impl State {
     ) -> Vec<List> {
         self.catalog = Catalog::new(apps);
         self.preferred = preferred;
+        self.rebuild_app_lists();
+        vec![List::Apps, List::Pins]
+    }
+
+    /// The user's names for apps changed: the catalogue is rebuilt with them
+    /// (sorted by the shown names) and the A–Z list and the pins follow.
+    /// Returns the lists that changed, none when the names changed no app
+    /// that is installed.
+    pub fn set_names(&mut self, names: &Names) -> Vec<List> {
+        let mut apps = self.catalog.a_to_z().to_vec();
+        names.apply(&mut apps);
+        if apps == self.catalog.a_to_z() {
+            return Vec::new();
+        }
+        self.catalog = Catalog::new(apps);
+        self.rebuild_app_lists();
+        vec![List::Apps, List::Pins]
+    }
+
+    fn rebuild_app_lists(&mut self) {
         self.lists[List::Apps.index()] = self
             .catalog
             .a_to_z()
@@ -102,7 +123,6 @@ impl State {
             .map(|a| app_item(a, 0.0))
             .collect();
         self.resolve_pins();
-        vec![List::Apps, List::Pins]
     }
 
     /// The answer to query `serial`, whose text was `query`.
@@ -222,6 +242,12 @@ impl State {
     pub fn app_of(&self, row_id: &str) -> Option<&AppEntry> {
         let desktop_id = row_id.strip_prefix("app:")?.split('#').next()?;
         self.catalog.get(desktop_id)
+    }
+
+    /// Whether the app behind a row shows a name the user gave it.
+    pub fn has_custom_name(&self, row_id: &str) -> bool {
+        self.app_of(row_id)
+            .is_some_and(|a| !a.original_name.is_empty())
     }
 
     /// The index of the first app under `letter` in the A–Z list, or -1.
@@ -417,6 +443,48 @@ mod tests {
         // Shown row 1 (Dolphin) is stored at 2, past the missing app.
         assert_eq!(s.stored_index(1), 2);
         assert_eq!(s.stored_index(9), 4);
+    }
+
+    #[test]
+    fn names_rename_sort_and_reach_the_pins() {
+        let mut s = state();
+        s.set_pins(vec!["org.kde.dolphin.desktop".into()]);
+        let titles = |s: &State, l: List| -> Vec<String> {
+            s.list(l).iter().map(|i| i.title.clone()).collect()
+        };
+        let mut names = Names::default();
+        assert!(names.set("org.kde.dolphin.desktop", "Zed Files"));
+        // A name for an app that is not installed changes nothing.
+        assert!(names.set("gone.desktop", "Nothing"));
+        assert_eq!(s.set_names(&names), [List::Apps, List::Pins]);
+        // Sorted by the shown name, in the section of its first letter.
+        assert_eq!(titles(&s, List::Apps), ["7-Zip", "Firefox", "Zed Files"]);
+        assert_eq!(titles(&s, List::Pins), ["Zed Files"]);
+        assert_eq!(s.letters(), ["#", "F", "Z"]);
+        assert_eq!(s.letter_index("Z"), 2);
+        assert_eq!(section_of(&s.list(List::Apps)[2]), "Z");
+        assert!(s.has_custom_name("app:org.kde.dolphin.desktop"));
+        assert!(!s.has_custom_name("app:firefox.desktop"));
+        assert_eq!(
+            s.app_of("app:org.kde.dolphin.desktop")
+                .unwrap()
+                .original_name,
+            "Dolphin"
+        );
+        // The same names again: nothing to redraw.
+        assert!(s.set_names(&names).is_empty());
+        // Reset: back to the app's own name and place.
+        assert!(names.reset("org.kde.dolphin.desktop"));
+        assert_eq!(s.set_names(&names), [List::Apps, List::Pins]);
+        assert_eq!(titles(&s, List::Apps), ["7-Zip", "Dolphin", "Firefox"]);
+        assert!(!s.has_custom_name("app:org.kde.dolphin.desktop"));
+        // A new catalogue (an install) keeps working with the names given by
+        // the caller.
+        let mut apps = vec![app("org.kde.dolphin.desktop", "Dolphin")];
+        names.set("org.kde.dolphin.desktop", "Mine");
+        names.apply(&mut apps);
+        s.set_apps(apps, HashMap::new());
+        assert_eq!(titles(&s, List::Apps), ["Mine"]);
     }
 
     #[test]

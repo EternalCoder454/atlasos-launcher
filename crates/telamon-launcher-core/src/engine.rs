@@ -7,7 +7,8 @@
 //!   phase, merges late batches, and serialises the usage store for saving.
 //! - **launcher-io** owns the files: it loads them at start and when the
 //!   panel opens (only what changed), and does every write (`usage.tsv`,
-//!   `pinned.list`) atomically. It also owns the pin list.
+//!   `pinned.list`, `names.conf`) atomically. It also owns the pin list and
+//!   the app names.
 //!
 //! Every [`Engine`] method only sends a message, so the GUI thread never
 //! blocks. Both threads block on `recv` (no timers, no polling); when
@@ -30,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::catalog::{self, AppEntry, Catalog};
 use crate::commands::{PathCache, SessionAvailability, SessionCommands};
 use crate::fsutil::{read_capped, sweep_stale_temps, write_atomic};
+use crate::names::{self, Names};
 use crate::pins::{self, Pins};
 use crate::query::{self, Context, ResultSet, SearchOptions, Source, Sources};
 use crate::recent::{RecentError, RecentFiles};
@@ -58,6 +60,7 @@ const MAX_IMPORT_LIST: usize = 1024;
 
 const USAGE_FILE: &str = "usage.tsv";
 const PINS_FILE: &str = "pinned.list";
+const NAMES_FILE: &str = "names.conf";
 
 /// Where things are. Every path is the caller's; nothing is read from the
 /// environment here.
@@ -66,7 +69,7 @@ pub struct EngineConfig {
     pub home: PathBuf,
     /// `$XDG_STATE_HOME/telamon-launcher`: `usage.tsv`.
     pub state_dir: PathBuf,
-    /// `$XDG_CONFIG_HOME/telamon-launcher`: `pinned.list`.
+    /// `$XDG_CONFIG_HOME/telamon-launcher`: `pinned.list` and `names.conf`.
     pub config_dir: PathBuf,
     /// `/etc/xdg/telamon-launcher/pinned.list`, used until the user has a list.
     pub system_pins: PathBuf,
@@ -97,6 +100,13 @@ pub enum ProblemKind {
     PinsUnreadable,
     /// `pinned.list` could not be written; the pins stay in memory.
     PinsWriteFailed,
+    /// `names.conf` is too large or not readable; the app names start empty.
+    NamesUnreadable,
+    /// `names.conf` could not be written; the names stay in memory.
+    NamesWriteFailed,
+    /// A new app name was refused (not a valid app, nothing left of the name
+    /// after cleaning, or the list is full).
+    NameRefused,
     /// An import of Andromeda's favourites was ignored (the user already has
     /// a list, or nothing in it was valid).
     ImportSkipped,
@@ -116,6 +126,8 @@ pub enum Update {
     },
     /// The pinned ids in order, as stored.
     Pins(Vec<String>),
+    /// The user's names for apps, after the file was read or changed.
+    Names(Names),
     /// The Start page's recent apps and files.
     Recent {
         apps: Vec<ResultItem>,
@@ -236,6 +248,10 @@ enum IoMsg {
     Unpin(String),
     MovePin(String, usize),
     ImportPins(Vec<String>),
+    /// Name the app with this desktop id.
+    RenameApp(String, String),
+    /// Give the app its own name back.
+    ResetAppName(String),
     WriteUsage(Vec<u8>),
     ClearUsage,
     Shutdown,
@@ -433,6 +449,19 @@ impl Engine {
 
     pub fn move_pin(&self, id: String, index: usize) {
         self.to_io(IoMsg::MovePin(id, index));
+    }
+
+    /// Shows app `id` (a desktop file id) under the user's own `name`. The
+    /// name is cleaned here (see [`names::clean_name`]); answered with
+    /// `Update::Names`.
+    pub fn rename_app(&self, id: String, name: String) {
+        self.to_io(IoMsg::RenameApp(id, name));
+    }
+
+    /// Gives app `id` its own name back; answered with `Update::Names` when
+    /// it had a custom one.
+    pub fn reset_app_name(&self, id: String) {
+        self.to_io(IoMsg::ResetAppName(id));
     }
 
     /// Andromeda's favourites, taken over only while the user has no
@@ -659,6 +688,7 @@ impl Search {
                 );
                 self.sources.catalog = Arc::new(catalog);
                 self.recent_dirty = true;
+                self.retitle_shown_apps();
             }
             SearchMsg::SetOptions(o) => {
                 self.opts = o;
@@ -699,6 +729,18 @@ impl Search {
             #[cfg(test)]
             SearchMsg::TestPanic => panic!("injected"),
             SearchMsg::Shutdown => {}
+        }
+    }
+
+    /// A new catalogue may carry a new name for an app on screen (the user
+    /// renamed it): the answer to the current query shows the new title in
+    /// the same row.
+    fn retitle_shown_apps(&mut self) {
+        let catalog = &self.sources.catalog;
+        let Some(set) = self.set.as_mut() else { return };
+        if set.update_rows(|row| catalog.refresh_title(row)) {
+            let (serial, items) = (set.serial(), set.items());
+            self.out.send(Update::Results { serial, items });
         }
     }
 
@@ -858,6 +900,7 @@ struct Io {
     out: Emitter,
     search: Sender<SearchMsg>,
     pins: Pins,
+    names: Names,
     /// Whether the user has a `pinned.list` (or one that could not be read,
     /// which must not be replaced by an import).
     user_pins: bool,
@@ -880,6 +923,7 @@ impl Io {
             out,
             search,
             pins: Pins::default(),
+            names: Names::default(),
             user_pins: false,
             #[cfg(test)]
             load_gate: hooks.load_gate.take(),
@@ -934,6 +978,12 @@ impl Io {
             IoMsg::Unpin(id) => self.change_pins(|p| p.unpin(&id)),
             IoMsg::MovePin(id, i) => self.change_pins(|p| p.move_to(&id, i)),
             IoMsg::ImportPins(list) => self.import_pins(&list),
+            IoMsg::RenameApp(id, name) => self.rename_app(&id, &name),
+            IoMsg::ResetAppName(id) => {
+                if self.names.reset(&id) {
+                    self.save_names();
+                }
+            }
             IoMsg::WriteUsage(bytes) => {
                 if let Err(e) = self.write_usage(&bytes) {
                     log::warn!("usage not saved: {}", io_kind(&e));
@@ -982,6 +1032,7 @@ impl Io {
         if let Some(swept) = self.stage(|_| {
             sweep_stale_temps(&state, USAGE_FILE, STALE_TEMP_AGE)
                 + sweep_stale_temps(&config, PINS_FILE, STALE_TEMP_AGE)
+                + sweep_stale_temps(&config, NAMES_FILE, STALE_TEMP_AGE)
         }) && swept > 0
         {
             log::info!("removed {swept} stale temp files");
@@ -990,6 +1041,8 @@ impl Io {
         self.to_search(SearchMsg::UsageLoaded(usage));
         self.guarded(Io::load_pins);
         self.out.send(Update::Pins(self.pins.ids().to_vec()));
+        self.guarded(Io::load_names);
+        self.out.send(Update::Names(self.names.clone()));
     }
 
     /// Like `guarded`, but returns the result (None after a panic).
@@ -1055,6 +1108,41 @@ impl Io {
                 self.out.problem(ProblemKind::PinsUnreadable);
             }
         }
+    }
+
+    fn load_names(&mut self) {
+        let path = self.config_dir.join(NAMES_FILE);
+        match read_capped(&path, names::MAX_FILE_BYTES) {
+            Ok(Some(bytes)) => {
+                self.names = Names::parse(&bytes);
+                if self.names.skipped() > 0 {
+                    log::info!("names: {} lines skipped", self.names.skipped());
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!("names not read: {}", io_kind(&e));
+                self.out.problem(ProblemKind::NamesUnreadable);
+            }
+        }
+    }
+
+    fn rename_app(&mut self, id: &str, name: &str) {
+        if self.names.set(id, name) {
+            self.save_names();
+        } else if self.names.get(id) != Some(names::clean_name(name).as_str()) {
+            // Not "already that name": the name was refused.
+            self.out.problem(ProblemKind::NameRefused);
+        }
+    }
+
+    fn save_names(&mut self) {
+        let path = self.config_dir.join(NAMES_FILE);
+        if let Err(e) = write_atomic(&path, &self.names.to_bytes(), 0o600) {
+            log::warn!("names not saved: {}", io_kind(&e));
+            self.out.problem(ProblemKind::NamesWriteFailed);
+        }
+        self.out.send(Update::Names(self.names.clone()));
     }
 
     fn change_pins(&mut self, f: impl FnOnce(&mut Pins) -> bool) {
@@ -1489,6 +1577,34 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_app_keeps_its_row_and_gets_its_new_title() {
+        let f = fixture();
+        let (e, rx) = start(&f);
+        e.set_apps(two_apps());
+        e.query(1, "alpha".into());
+        let before = results(&rx, 1);
+        let ids: Vec<&str> = before.iter().map(|r| r.id.as_str()).collect();
+        // The catalogue comes again with the user's name on one app.
+        let mut apps = two_apps();
+        apps[1].original_name = apps[1].name.clone();
+        apps[1].name = "Photos".into();
+        e.set_apps(apps);
+        let after = results(&rx, 1);
+        assert_eq!(
+            after.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ids,
+            "no row moved"
+        );
+        let titles: Vec<&str> = after.iter().map(|r| r.title.as_str()).collect();
+        assert!(titles.contains(&"Photos") && !titles.contains(&"Alpha Viewer"));
+        // A catalogue that changes no shown title sends nothing more.
+        e.set_apps(vec![]);
+        e.query(2, "zzz".into());
+        let _ = results(&rx, 2);
+        stop(e);
+    }
+
+    #[test]
     fn stale_merge_is_ignored() {
         let f = fixture();
         let (e, rx) = start(&f);
@@ -1641,6 +1757,78 @@ mod tests {
         );
         let (e, rx) = start(&f);
         assert_eq!(pins_update(&rx), ["b.desktop", "a.desktop"]);
+        stop(e);
+    }
+
+    fn names_update(rx: &Receiver<Update>) -> Names {
+        wait(rx, |u| match u {
+            Update::Names(n) => Some(n),
+            _ => None,
+        })
+    }
+
+    fn problem(rx: &Receiver<Update>) -> ProblemKind {
+        wait(rx, |u| match u {
+            Update::Problem(k) => Some(k),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn names_persist_reset_and_are_cleaned() {
+        let f = fixture();
+        let (e, rx) = start(&f);
+        assert!(names_update(&rx).is_empty());
+        e.rename_app("a.desktop".into(), "  My \u{202e} App  ".into());
+        assert_eq!(names_update(&rx).get("a.desktop"), Some("My App"));
+        e.rename_app("b.desktop".into(), "Other".into());
+        assert_eq!(names_update(&rx).len(), 2);
+        // The same name again changes nothing and is not an error.
+        e.rename_app("b.desktop".into(), "Other".into());
+        // Refused: not a desktop id, or nothing left of the name.
+        e.rename_app("not valid".into(), "X".into());
+        assert_eq!(problem(&rx), ProblemKind::NameRefused);
+        e.rename_app("a.desktop".into(), " \u{202e} ".into());
+        assert_eq!(problem(&rx), ProblemKind::NameRefused);
+        e.reset_app_name("b.desktop".into());
+        let n = names_update(&rx);
+        assert_eq!(
+            (n.get("a.desktop"), n.get("b.desktop")),
+            (Some("My App"), None)
+        );
+        // Resetting an app with no name saves nothing and says nothing.
+        e.reset_app_name("b.desktop".into());
+        stop(e);
+
+        let file = f.cfg.config_dir.join(NAMES_FILE);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (e, rx) = start(&f);
+        assert_eq!(names_update(&rx).get("a.desktop"), Some("My App"));
+        stop(e);
+    }
+
+    #[test]
+    fn a_bad_names_file_starts_empty_and_is_reported() {
+        let f = fixture();
+        std::fs::create_dir_all(&f.cfg.config_dir).unwrap();
+        let file = f.cfg.config_dir.join(NAMES_FILE);
+        // Too large to read: no names, a problem, and the file is not touched.
+        std::fs::write(&file, vec![b'#'; names::MAX_FILE_BYTES as usize + 1]).unwrap();
+        let (e, rx) = start(&f);
+        assert!(names_update(&rx).is_empty());
+        stop(e);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().len(),
+            names::MAX_FILE_BYTES + 1
+        );
+        // A folder where the file belongs is not a regular file either.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let (e, rx) = start(&f);
+        assert_eq!(problem(&rx), ProblemKind::NamesUnreadable);
         stop(e);
     }
 
