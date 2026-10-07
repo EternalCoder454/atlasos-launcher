@@ -1,13 +1,13 @@
-# The build and test image of AtlasOS Launcher: CI runs in it
+# The build and test image of Telamon Launcher: CI runs in it
 # (ghcr.io/eternalcoder454/atlas-launcher-dev, the `ci` target) and
 # scripts/dev.sh builds the same file locally (the `dev` target). Every package
 # the build, the tests and the lint need is listed here and nowhere else.
 #
 #   podman build -f ci/Containerfile --target ci \
-#       --build-arg ATLAS_FRAMEWORK_REF=<tag> -t <name> .
+#       --build-arg TELAMON_FRAMEWORK_REF=<tag> -t <name> .
 #
-# Build context: the repo root (only packaging/atlas-launcher.spec is read).
-# ATLAS_FRAMEWORK_REF is the tag in Cargo.toml (ci/framework-ref.sh prints it).
+# Build context: the repo root (only packaging/telamon-launcher.spec is read).
+# TELAMON_FRAMEWORK_REF is the tag in Cargo.toml (ci/framework-ref.sh prints it).
 # telamon-ui, which the app builds against, is in no repository: the first stage
 # builds atlas-framework's RPMs from that tag.
 # The image is public once pushed: nothing secret may go in (ci/secret-check.sh
@@ -16,12 +16,12 @@
 ARG FEDORA=registry.fedoraproject.org/fedora:44
 
 FROM ${FEDORA} AS framework
-ARG ATLAS_FRAMEWORK_REF
-RUN test -n "$ATLAS_FRAMEWORK_REF" || { echo "set --build-arg ATLAS_FRAMEWORK_REF=<tag>" >&2; exit 1; }
+ARG TELAMON_FRAMEWORK_REF
+RUN test -n "$TELAMON_FRAMEWORK_REF" || { echo "set --build-arg TELAMON_FRAMEWORK_REF=<tag>" >&2; exit 1; }
 RUN --mount=type=cache,target=/var/cache/libdnf5,sharing=locked \
     dnf -y --setopt=keepcache=1 install git-core tar gzip rpm-build dnf5-plugins
 # A tag or a branch, not a bare commit; build-rpm.sh packages HEAD.
-RUN git clone --quiet --depth 1 --branch "$ATLAS_FRAMEWORK_REF" \
+RUN git clone --quiet --depth 1 --branch "$TELAMON_FRAMEWORK_REF" \
         https://github.com/EternalCoder454/atlas-framework /framework
 RUN --mount=type=cache,target=/var/cache/libdnf5,sharing=locked \
     /framework/packaging/build-rpm.sh /out
@@ -29,10 +29,10 @@ RUN rm -rf /framework/.git
 
 FROM ${FEDORA} AS ci
 LABEL org.opencontainers.image.source=https://github.com/EternalCoder454/atlasos-launcher \
-      org.opencontainers.image.description="AtlasOS Launcher build and test image" \
+      org.opencontainers.image.description="Telamon Launcher build and test image" \
       org.opencontainers.image.licenses=MIT
-COPY --from=framework /out/ /atlas-rpms/
-COPY packaging/atlas-launcher.spec /tmp/atlas-launcher.spec
+COPY --from=framework /out/ /telamon-rpms/
+COPY packaging/telamon-launcher.spec /tmp/telamon-launcher.spec
 # Tools beyond the spec's BuildRequires:
 #   mold, ccache         faster linking and C++ compiles
 #   clippy, rustfmt      lint
@@ -44,13 +44,13 @@ RUN --mount=type=cache,target=/var/cache/libdnf5,sharing=locked \
         clippy rustfmt mold ccache ShellCheck desktop-file-utils \
         dbus-daemon xorg-x11-server-Xvfb qt6-qtbase-gui kf6-qqc2-desktop-style \
         qt6-qtdeclarative-devel \
-        /atlas-rpms/telamon-ui-[0-9]*.rpm /atlas-rpms/telamon-symbols-fonts-[0-9]*.rpm && \
-    dnf -y --setopt=keepcache=1 builddep /tmp/atlas-launcher.spec && \
-    rm -rf /atlas-rpms /tmp/atlas-launcher.spec
+        /telamon-rpms/telamon-ui-[0-9]*.rpm /telamon-rpms/telamon-symbols-fonts-[0-9]*.rpm && \
+    dnf -y --setopt=keepcache=1 builddep /tmp/telamon-launcher.spec && \
+    rm -rf /telamon-rpms /tmp/telamon-launcher.spec
 # atlas-framework's source, for its lint tools (tools/lint-app.sh,
 # tools/check-app-names.sh read ui/ too), at the same tag as telamon-ui.
-COPY --from=framework /framework /opt/atlas-framework
-ENV ATLAS_FRAMEWORK=/opt/atlas-framework
+COPY --from=framework /framework /opt/telamon-framework
+ENV TELAMON_FRAMEWORK=/opt/telamon-framework
 # dev-image.yml compares this with ci/image-tag.sh to see whether the published
 # image is out of date.
 ARG IMAGE_TAG=

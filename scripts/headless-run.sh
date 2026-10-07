@@ -8,12 +8,12 @@
 #   scripts/dev.sh bash scripts/headless-run.sh <run name> [binary] [trace]
 # With "trace", the app runs under strace (process and signal calls only,
 # into strace.log) to find out how it ended; timings are then not real.
-# The binary defaults to /work/cmake/dev/atlas-launcher (the app build of
+# The binary defaults to /work/cmake/dev/telamon-launcher (the app build of
 # CLAUDE.md). Output: /work/runs/<run>/ (shots, logs, metrics.txt).
 set -euo pipefail
 
 run=${1:?usage: headless-run.sh <run name> [binary]}
-bin=${2:-/work/cmake/dev/atlas-launcher}
+bin=${2:-/work/cmake/dev/telamon-launcher}
 trace=${3:-}
 case $trace in '' | trace) ;; *) echo "the third argument is trace or nothing" >&2; exit 2 ;; esac
 # No leading dot: "." or ".." would make the rm below wipe /work.
@@ -40,6 +40,14 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     done
     echo '</xbel>'
 } >"$XDG_DATA_HOME/recently-used.xbel"
+
+# What 0.2.x left (the names before the rename): a config folder with pins and
+# options, a history, and the runners' state. The first run moves them.
+mkdir -p "$XDG_CONFIG_HOME/atlas-launcher" "$XDG_STATE_HOME/atlas-launcher"
+printf 'preferred://browser\nnet.eterneon.atlas.store.desktop\norg.kde.systemsettings.desktop\n' >"$XDG_CONFIG_HOME/atlas-launcher/pinned.list"
+printf '[Search]\nWebSearch=false\n' >"$XDG_CONFIG_HOME/atlas-launcher/launcher.conf"
+printf 'set\tapp:net.eterneon.atlas.settings.desktop\t5\t%s\n' "$(date +%s)" >"$XDG_STATE_HOME/atlas-launcher/usage.tsv"
+printf '[General]\nx=1\n' >"$XDG_STATE_HOME/atlas-launcherstaterc"
 
 # The inner part runs on a private bus that only this container sees.
 # shellcheck disable=SC2016
@@ -79,7 +87,7 @@ exec dbus-run-session -- bash -c '
     log "kwin up"
 
     export WAYLAND_DISPLAY=wl-test QT_QPA_PLATFORM=wayland
-    export QT_LOGGING_RULES="atlas.launcher*.debug=true"
+    export QT_LOGGING_RULES="telamon.launcher*.debug=true"
     export QT_FORCE_STDERR_LOGGING=1 RUST_BACKTRACE=1
     export QT_MESSAGE_PATTERN="%{time hh:mm:ss.zzz} %{category} %{type}: %{message}"
     t0=$(date +%s%N)
@@ -89,9 +97,9 @@ exec dbus-run-session -- bash -c '
         "$bin" --daemon >"$out/app.log" 2>&1 &
     fi
     app=$!
-    name=net.eterneon.atlas.launcher
-    path=/net/eterneon/atlas/launcher
-    iface=net.eterneon.atlas.Launcher1
+    name=net.eterneon.telamon.launcher
+    path=/net/eterneon/telamon/launcher
+    iface=net.eterneon.telamon.Launcher1
     up=0
     for _ in $(seq 100); do
         if timeout 5 gdbus call --session -d org.freedesktop.DBus -o /org/freedesktop/DBus \
@@ -106,6 +114,25 @@ exec dbus-run-session -- bash -c '
         exit 1
     fi
     metric "startup_to_bus_ms $(( ($(date +%s%N) - t0) / 1000000 ))"
+    # The files of the old name moved, once, and were read from the new place.
+    mig=0
+    [ -f "$XDG_CONFIG_HOME/telamon-launcher/pinned.list" ] && [ -f "$XDG_CONFIG_HOME/telamon-launcher/launcher.conf" ] \
+        && [ -f "$XDG_STATE_HOME/telamon-launcher/usage.tsv" ] && [ -f "$XDG_STATE_HOME/telamon-launcherstaterc" ] \
+        && [ ! -e "$XDG_CONFIG_HOME/atlas-launcher" ] && [ ! -e "$XDG_STATE_HOME/atlas-launcher" ] \
+        && [ ! -e "$XDG_STATE_HOME/atlas-launcherstaterc" ] && mig=1
+    metric "migration_moved_all $mig"
+    [ $mig = 1 ] || { log "FAILED: the old files did not move"; failures=$((failures + 1)); }
+    # The name before the rename answers too.
+    # (it is taken a moment after the new one, once the panel exists)
+    for n in net.eterneon.telamon.launcher net.eterneon.atlas.launcher; do
+        owned=0
+        for _ in $(seq 50); do
+            v=$(timeout 5 gdbus call --session -d org.freedesktop.DBus -o /org/freedesktop/DBus -m org.freedesktop.DBus.NameHasOwner $n 2>&1 || true)
+            case $v in *true*) owned=1; break;; esac
+            sleep 0.1
+        done
+        if [ $owned = 1 ]; then metric "bus_name_owned $n"; else log "FAILED: $n not owned"; failures=$((failures + 1)); fi
+    done
     sleep 3   # the catalogue, recent files and runner prewarm settle
     # The app runs in this container, so its PID is read in this /proc. A
     # dead app fails the run at the step that found it, with its status.
@@ -146,6 +173,26 @@ exec dbus-run-session -- bash -c '
     call Show search "Notes" "{}"; sleep 1; shot 06-search-recent-file
     call Show search "zzzzqqq" "{}"; sleep 1; shot 07-search-no-results
     check rss_after_queries; metric "rss_after_queries_kb $(rss)"
+
+    # The old name, path and interface: the dock button of 0.2.x and old scripts.
+    legacy() { check "legacy $1"; timeout 10 gdbus call --session -d net.eterneon.atlas.launcher -o /net/eterneon/atlas/launcher -m "net.eterneon.atlas.Launcher1.$1" "${@:2}" >>"$out/steps.log" 2>&1 || fail "legacy call $1"; }
+    log "legacy name: Show start, Visible, Hide"
+    legacy Show start "" "{}"; sleep 1; shot 07b-start-via-old-name
+    v=$(timeout 5 gdbus call --session -d net.eterneon.atlas.launcher -o /net/eterneon/atlas/launcher -m org.freedesktop.DBus.Properties.Get net.eterneon.atlas.Launcher1 Visible 2>&1)
+    log "legacy Visible: $v"; metric "legacy_visible_when_shown $v"
+    case $v in *true*) ;; *) fail "legacy Visible is not true while shown";; esac
+    legacy Hide; sleep 1
+    v=$(timeout 5 gdbus call --session -d net.eterneon.atlas.launcher -o /net/eterneon/atlas/launcher -m org.freedesktop.DBus.Properties.Get net.eterneon.atlas.Launcher1 Visible 2>&1)
+    case $v in *false*) metric "legacy_visible_when_hidden $v";; *) fail "legacy Visible is not false when hidden: $v";; esac
+    legacy ClearHistory
+    [ ! -e "$XDG_STATE_HOME/telamon-launcher/usage.tsv" ] && metric "legacy_clear_history ok" || fail "legacy ClearHistory left usage.tsv"
+    # A bad mode: the old interface answers exactly as the new one does, and
+    # opens nothing.
+    v=$(timeout 5 gdbus call --session -d net.eterneon.atlas.launcher -o /net/eterneon/atlas/launcher -m net.eterneon.atlas.Launcher1.Show bogus "" "{}" 2>&1 || true)
+    w=$(timeout 5 gdbus call --session -d $name -o $path -m "$iface.Show" bogus "" "{}" 2>&1 || true)
+    log "Show with a bad mode: old [$v] new [$w]"
+    [ "$v" = "$w" ] && metric "legacy_bad_mode same_as_new" || fail "the old interface answers a bad mode differently: [$v] [$w]"
+    shot 07c-after-bad-mode
 
     log "hide"
     call Hide; sleep 1; shot 08-hidden

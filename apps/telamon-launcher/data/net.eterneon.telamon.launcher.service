@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=net.eterneon.telamon.launcher
+Exec=/usr/bin/telamon-launcher --daemon
+SystemdService=telamon-launcher.service

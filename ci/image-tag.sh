@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 hash=$({
     cat ci/Containerfile
-    grep -E '^BuildRequires:' packaging/atlas-launcher.spec
+    grep -E '^BuildRequires:' packaging/telamon-launcher.spec
     ci/framework-ref.sh
 } | sha256sum | cut -c1-16)
 printf '44-%s\n' "$hash"

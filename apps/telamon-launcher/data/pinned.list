@@ -1,0 +1,10 @@
+# Telamon OS's default pinned apps, in order: one desktop file id per line, or
+# preferred://browser, preferred://filemanager, preferred://terminal.
+# Apps that aren't installed are skipped. A user's own list is
+# ~/.config/telamon-launcher/pinned.list.
+preferred://browser
+preferred://filemanager
+preferred://terminal
+net.eterneon.telamon.notepad.desktop
+net.eterneon.telamon.store.desktop
+net.eterneon.telamon.settings.desktop

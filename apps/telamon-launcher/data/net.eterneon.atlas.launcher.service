@@ -1,0 +1,7 @@
+[D-BUS Service]
+# The name before the rename to Telamon Launcher (0.3.0), for this release: a
+# call to it (an old dock button, a script) starts the launcher, which then
+# answers on this name as well as on net.eterneon.telamon.launcher.
+Name=net.eterneon.atlas.launcher
+Exec=/usr/bin/telamon-launcher --daemon
+SystemdService=telamon-launcher.service
