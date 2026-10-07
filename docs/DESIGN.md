@@ -42,6 +42,9 @@ on results and sections they can hide. So, top to bottom:
    remembered in `state.conf`. In A–Z the letter headings open the letter
    grid (A–Z, then #; letters with no apps dimmed).
 
+Any app can be renamed from its right-click menu (see "App names"); the
+name the user chose is what every part of the launcher shows for it.
+
 Typing turns the page into **one ranked list**: apps, Telamon Settings pages
 and settings, files and folders, calculator and unit conversion, commands,
 web search, and the results of every enabled KRunner plugin. Each row shows
@@ -76,6 +79,8 @@ when it is empty. Menu, Shift+F10 or a right click opens the context menu:
 | App Settings | apps | Settings `ActivateAction("open-app", [id])` |
 | Uninstall | Flatpak apps only | `telamon-store --remove <X-Flatpak id>` through CommandLauncherJob with an activation token; other apps show it disabled with "Part of Telamon OS" |
 | Move to Front, Left, Right | pinned | `pinned.list` |
+| Rename App… | apps | an in-place field, then `names.conf` (see "App names") |
+| Reset Name | apps that have a name of the user's | removes its line from `names.conf` |
 | Edit Applications… | panel menu | kmenuedit's desktop file through ApplicationLauncherJob |
 
 ## Form: a resident layer-shell process, with a QML button in the dock
@@ -201,6 +206,7 @@ KGlobalAccel binding) still opens Search.
 | `$XDG_CONFIG_HOME/telamon-launcher/launcher.conf` | Options, written by Settings' "Launcher & Search" page with KConfig::Notify and followed live with KConfigWatcher | KConfig ini (below) |
 | `$XDG_CONFIG_HOME/telamon-launcher/pinned.list` | Pinned apps in order | One desktop file id per line (`org.kde.dolphin.desktop`), or `preferred://browser`, `preferred://filemanager`, `preferred://terminal`; `#` comments |
 | `/etc/xdg/telamon-launcher/pinned.list` | The image's default pins | Same |
+| `$XDG_CONFIG_HOME/telamon-launcher/names.conf` | The user's own names for apps, shown by the launcher only (see "App names") | `[Names]` group, one `desktop-file-id=Name` per line; `#` comments |
 | `$XDG_CONFIG_HOME/telamon-launcher/state.conf` | The Start page's app view (`[Start] appView`: 0 by kind, 1 A–Z), written by the panel | KConfig-style ini (Qt's Settings) |
 | `$XDG_STATE_HOME/telamon-launcher/usage.tsv` | What the user ran, for ranking. Cleared by ClearHistory or by deleting it | `query-prefix TAB result-id TAB count TAB last-used-unix`, at most 2,000 lines |
 
@@ -282,7 +288,8 @@ The Settings app, when its D-Bus call fails, starts as
   - the calculator and unit converter;
   - the Settings index parser;
   - the `recently-used.xbel` parser;
-  - the usage store, the pins store and `PATH` command resolution;
+  - the usage store, the pins store, the app names store and `PATH`
+    command resolution;
   - web search URLs.
   It has unit tests and fixtures, and a bench of the query engine.
 - `apps/telamon-launcher`:
@@ -293,7 +300,7 @@ The Settings app, when its D-Bus call fails, starts as
   - `cpp/system.*`: power, session, user and KGlobalAccel.
   - `src/` (CXX-Qt): the results and start-page models, and the bridge to
     the core.
-  - `qml/`.
+  - `qml/` (`LauncherRenameEditor.qml` is the in-place rename field).
 - `plasmoid/net.eterneon.telamon.launcher.button/`: the dock button, QML only.
 - `packaging/`: the RPM spec and `build-rpm.sh`, the user unit, the D-Bus
   service file and the default `pinned.list`.
@@ -330,6 +337,13 @@ quality `m`, from strongest to weakest:
 | substring | 0.5 |
 | typo-tolerant subsequence (gap-penalised) | 0.3–0.5 |
 | description | 0.3 |
+
+An app the user renamed is matched on **both** names: the one shown (as
+the name, with the table above) and the one it came with (the same table,
+weighted 0.95, so searching for the old name finds the app but never ranks
+it above an app that really has that name). Its keywords, generic name and
+executable still match as they did, and "name action" queries ("firefox
+private") follow either name.
 
 **Score** = `m × prior(kind) + learned`.
 
@@ -407,6 +421,49 @@ The launcher sends nothing itself.
   `recently-used.xbel` (which KDE apps write through KRecentDocument, and
   GTK apps too).
 
+## App names
+
+"Rename App…" in the right-click menu of an app (a grid tile, a pinned icon,
+a recent chip, a search result row, the best-match card) opens a small field
+over the name of that item, filled with the name it shows and selected.
+Enter saves, Escape (or a click anywhere else, or the panel closing) cancels,
+and an empty or blank name, or the app's own, gives the app's own name back.
+Once an app has a name of the user's, the menu also offers "Reset Name". The
+field is one popup of the panel (`LauncherRenameEditor.qml`, drawn in the
+overlay like the menu), not part of the tiles and rows, because a rename
+changes the lists and remakes them.
+
+**The name is the launcher's own.** It lives in `names.conf` (above), keyed by
+the app's desktop file ID, and nowhere else: the desktop file is never copied
+or edited, so the app keeps following its own updates, and deleting the file
+(or a line) gives the app's name back. The other apps, the dock and Plasma's
+menus show the app's own name as before.
+
+**Where it shows.** Everywhere the launcher shows the app: the grid (grouped
+and A–Z, sorted by the name shown, so a renamed app moves to its new letter),
+the pins' tooltips and accessible names, the recent chips, the results and the
+best-match card (desktop action rows read "Name › Action" with it). Search
+matches both names (see "Search").
+
+**How.** The IO worker owns the names, as it owns the pins: it reads
+`names.conf` at start, applies a change (`Engine::rename_app`,
+`reset_app_name`) and writes the file atomically, then reports the whole list
+(`Update::Names`). The panel puts the names on the catalogue it gets from
+KService (`names::Names::apply`: the shown name is the user's, the app's own
+is kept in `AppEntry::original_name`) and gives the search worker the same
+catalogue, so the grid, the pins, the recent apps and the results agree. A
+name that arrives while a query's rows are on screen changes their titles in
+place (no row is added, removed or moved). The names of apps that are not
+installed are ignored and kept, as pinned apps are, so a reinstall brings
+the name back; the list holds at most 400.
+
+**What a name may be.** It is untrusted text wherever it enters (the editor,
+a hand-edited file): `names::clean_name` removes control, bidi, zero-width and
+other invisible characters (a tab or line break counts as a space), makes runs
+of spaces one, trims, and cuts at 64 characters. The ID must be a valid
+desktop file ID. Names are shown as plain text (`textFormat: Text.PlainText`)
+and are never logged: only counts and error kinds.
+
 ## Launching
 
 - Apps start through `KIO::ApplicationLauncherJob` (with the desktop action
@@ -431,8 +488,8 @@ The GUI thread never blocks:
   with a timeout).
 - **Search worker** (one Rust thread): queries, merging, scoring, the
   usage store.
-- **IO worker:** reads `usage.tsv` and `pinned.list` at start, and does
-  every write (`usage.tsv`, `pinned.list`), so a write never waits behind a
+- **IO worker:** reads `usage.tsv`, `pinned.list` and `names.conf` at start,
+  and does every write (`usage.tsv`, `pinned.list`, `names.conf`), so a write never waits behind a
   slow read.
 - **Scan worker:** the slow reads, `recently-used.xbel` (with a `stat` per
   entry), the `PATH` scan and the Settings index. They are repeated when the
@@ -511,7 +568,8 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   - Links must match `[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)*` (no segment
     starts with `-`), at most 128 bytes, and are only passed back to Settings.
   - Text is length-capped.
-- **The user's own files** (`launcher.conf`, `pinned.list`, `usage.tsv`):
+- **The user's own files** (`launcher.conf`, `pinned.list`, `names.conf`,
+  `usage.tsv`):
   read defensively; bad lines are skipped and counted in the log; size caps
   of 256 KiB each. Written atomically: a new file gets mode 0600, an
   existing one keeps its permission bits (never setuid, setgid or sticky).
@@ -543,6 +601,11 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   - Only `file:` URLs are opened. `OpenUrlJob` runs with a UI delegate and
     never `setRunExecutables(true)`, so KIO's prompts for executables and
     untrusted desktop files still fire.
+- **App names the user gave** (`names.conf`, and the rename field): the
+  group `[Names]` only; ids must be valid desktop file IDs; each name goes
+  through `names::clean_name` (invisible and bidi characters removed, at most
+  64 characters, nothing left means no name); at most 400 names and 256 KiB.
+  They are never logged.
 - **Displayed text:** every `Text`/`Label` that shows app, file, plugin or
   query text sets `textFormat: Text.PlainText`.
 - **Typed commands:**
@@ -585,11 +648,12 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 | A KRunner plugin is slow | The late phase stops waiting after 400 ms; matches that arrive later for the same query are still merged below the top hit, up to 2 s |
 | Explorer's index is missing, slow or erroring | Recent files only; the file row group says "File search is unavailable" once per session |
 | Settings index missing or invalid | No Settings results; one warning in the log |
-| `usage.tsv`, `pinned.list` or `launcher.conf` corrupt | Bad lines skipped; the file is rewritten on the next change |
+| `usage.tsv`, `pinned.list`, `names.conf` or `launcher.conf` corrupt | Bad lines skipped; the file is rewritten on the next change. A `names.conf` that is too large or unreadable gives no names (the apps show their own) and is left alone |
 | Disk full or file unwritable | Changes kept in memory, one warning; nothing is lost from the old file (atomic writes). The history is written again on the next use, when the panel opens and at shutdown |
 | A worker thread cannot start | The engine does nothing; one `ThreadStart` problem is reported and logged |
 | A recent file is on a hung network mount | Only the scan worker waits on its `stat` (the GUI, search and writes never do); recent files show the last list until it returns. At logout, shutdown stops waiting after 2 s |
 | A pinned app is uninstalled | Hidden, but kept in `pinned.list`, so a reinstall brings it back |
+| A renamed app is uninstalled | Its name is ignored but kept in `names.conf`, so a reinstall brings it back |
 | A launch fails | A notification with the job's error |
 | A power or session call fails | An inline message at the bottom of the panel |
 | No layer-shell (not KWin, or X11) | A frameless always-on-top window, centred; logged |
@@ -607,7 +671,9 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 - **Announcements:** after each query settles (500 ms), the result count and
   the top hit, through `Accessible.announce` ("12 results. Top hit: Firefox,
   app").
-- **Context menu:** opens from the keyboard (Menu, Shift+F10).
+- **Context menu:** opens from the keyboard (Menu, Shift+F10), and so does
+  "Rename App…" from it; the rename field takes the keyboard (named "Rename
+  App", described with the app's own name) and gives it back where it was.
 - **Reduced motion and transparency:**
   - Reduced motion (AccessibilityState) turns the open animation off.
   - The shared transparency switch (`atlasrc [Appearance] Transparency`)

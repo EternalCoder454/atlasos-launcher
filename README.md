@@ -9,6 +9,10 @@ The Start menu and search of [Telamon OS](https://github.com/EternalCoder454/atl
   folders, calculations and unit conversions, commands, web search and every
   installed KRunner plugin.
 - **Alt+Space** opens the same search on its own, in the middle of the screen.
+- **Right-click an app** to pin it, run one of its actions, or rename it
+  ("Rename App…"). The name is the launcher's own, kept in
+  `~/.config/telamon-launcher/names.conf`: the app is not changed, and
+  search finds it by either name.
 
 It learns what you pick in a plain file you can clear
 (`~/.local/state/telamon-launcher/usage.tsv`), and it uses no network unless

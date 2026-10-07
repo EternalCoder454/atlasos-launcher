@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-launcher
-Version:        0.3.0
+Version:        0.3.1
 Release:        1%{?dist}
 Summary:        Telamon Launcher, the Start menu and search of Telamon OS
 License:        MIT
@@ -127,6 +127,16 @@ test "$(readlink %{buildroot}%{_userunitdir}/atlas-launcher.service)" = telamon-
 %config(noreplace) %{_sysconfdir}/xdg/telamon-launcher/pinned.list
 
 %changelog
+* Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.1-1
+- New "Rename App…" in the right-click menu of an app (the grid, the pinned icons, the recent chips and the
+  search results, the best match included). The name is edited in place: Enter saves, Escape cancels, an empty
+  name gives the app's own back, and "Reset Name" appears once an app has a name of yours. The new name shows
+  everywhere the launcher shows the app (the grid and its A-Z order, the pins' tooltips, the recent chips, the
+  results), and search finds an app by either its name or the one it came with.
+- The names are the launcher's own, in ~/.config/telamon-launcher/names.conf: the app's desktop file is never
+  copied or edited, so the app keeps following its own updates. A name is cleaned (control and bidi
+  characters removed, at most 64 characters) wherever it comes from, and shown as plain text.
+
 * Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.0-1
 - Renamed to Telamon Launcher (telamon-launcher, net.eterneon.telamon.launcher, the dock button
   net.eterneon.telamon.launcher.button), on telamon-ui 2.0.0. Obsoletes and provides atlas-launcher.
