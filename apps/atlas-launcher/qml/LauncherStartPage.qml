@@ -39,6 +39,9 @@ FocusScope {
     readonly property int appView: viewState.appView
     // [{ key, title, items: [{ id, title, subtitle, icon }] }], in display order.
     property var sections: []
+    // False while new sections are made and not yet placed: their tiles
+    // draw nothing until each section knows where it is.
+    property bool placed: true
 
     // Up from the first region: back to the search field.
     signal backToField()
@@ -88,6 +91,7 @@ FocusScope {
             byKey[key].push(item)
         }
         const order = page.appView === 1 ? keys : page.groupOrder.filter(k => byKey[k] !== undefined)
+        page.placed = false
         page.sections = order.map(k => ({
             key: k,
             title: page.appView === 1 ? k : page.groupTitle(k),
@@ -97,6 +101,7 @@ FocusScope {
         // place decides which of its tiles draw (LauncherAppSection).
         appsColumn.forceLayout()
         column.forceLayout()
+        page.placed = true
     }
 
     // A fresh page each time the panel opens.
@@ -353,6 +358,7 @@ FocusScope {
                         columns: page.columns
                         cell: page.cell
                         letterHeader: page.appView === 1
+                        placed: page.placed
                         viewTop: flick.contentY - appsColumn.y - section.y
                         viewHeight: flick.height
                         onHeaderClicked: {

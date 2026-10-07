@@ -126,6 +126,9 @@ Window {
                 itemMenu.close()
                 announce.stop()
                 failureTimer.stop()
+                // The next show starts at the top anyway: going there now
+                // makes the Start page's top rows before that show, not in it.
+                startPage.reset()
             }
         }
     }
