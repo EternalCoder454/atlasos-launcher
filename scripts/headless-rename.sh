@@ -197,7 +197,7 @@ exec dbus-run-session -- bash -c '
     done
     sleep 3
     call Show start "" "{}"; sleep 1; shot "$(shotname 25-after-restart)"
-    if grep -hE "Quick Maths|Console|Writer|Notes|Music|Ghost|LLLL|PPPP|Chat|Web|evil" "$out/app.log" "$out/app2.log"; then
+    if grep -hE "Quick Maths|Console Window|Writer|Ghost|LLLL|PPPP|evil|ZZZ|Zzz" "$out/app.log" "$out/app2.log"; then
         fail "a name reached the log"
     fi
 

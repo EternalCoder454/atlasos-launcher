@@ -77,6 +77,10 @@ Window {
         case "NoClipboard":
             failure.text = qsTr("Could not copy to the clipboard.")
             break
+        case "NameRefused":
+        case "NamesWriteFailed":
+            failure.text = qsTr("Could not save that name.")
+            break
         case "SessionCall":
             failure.text = qsTr("The session did not respond.")
             break
