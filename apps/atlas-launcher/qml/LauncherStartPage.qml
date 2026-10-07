@@ -97,7 +97,9 @@ FocusScope {
 
     // A fresh page each time the panel opens.
     function reset() {
-        letters.visible = false
+        if (letters.item) {
+            letters.item.visible = false
+        }
         flick.contentY = 0
         pinList.currentIndex = -1
     }
@@ -125,7 +127,8 @@ FocusScope {
     }
 
     function jumpTo(letter) {
-        letters.close()
+        const grid = letters.item as LauncherLetterGrid
+        grid.close()
         for (let i = 0; i < page.sections.length; ++i) {
             if (page.sections[i].key === letter) {
                 const section = sectionRepeater.itemAt(i)
@@ -346,7 +349,11 @@ FocusScope {
                         columns: page.columns
                         cell: page.cell
                         letterHeader: page.appView === 1
-                        onHeaderClicked: letters.open(modelData.key)
+                        onHeaderClicked: {
+                            letters.active = true
+                            const grid = letters.item as LauncherLetterGrid
+                            grid.open(modelData.key)
+                        }
                         onActivated: (id) => page.backend.activate(2, id)
                         onMenuRequested: (id, item, x, y) => page.menu.openFor(2, id, item, x, y)
                         onFocusedItem: (item) => flick.show(item)
@@ -397,11 +404,15 @@ FocusScope {
         visible: flick.contentY > 1
     }
 
-    LauncherLetterGrid {
+    // Made the first time a letter heading is clicked.
+    Loader {
         id: letters
         anchors.fill: parent
-        letters: page.backend.letters
-        onChosen: (letter) => page.jumpTo(letter)
-        onClosed: page.focusSection(0, true)
+        active: false
+        sourceComponent: LauncherLetterGrid {
+            letters: page.backend.letters
+            onChosen: (letter) => page.jumpTo(letter)
+            onClosed: page.focusSection(0, true)
+        }
     }
 }

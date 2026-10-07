@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
@@ -141,10 +142,30 @@ Window {
         }
     }
 
-    LauncherItemMenu {
+    // The rows' context menu, made the first time one opens: most opens of
+    // the panel never right-click. The lists call `itemMenu`.
+    QtObject {
         id: itemMenu
-        backend: root.backend
-        actions: root.actions
+        function openFor(list, id, item, x, y, pinIndex, pinCount) {
+            itemMenuLoader.active = true
+            const menu = itemMenuLoader.item as LauncherItemMenu
+            menu.openFor(list, id, item, x, y, pinIndex, pinCount)
+        }
+        function close() {
+            const menu = itemMenuLoader.item as LauncherItemMenu
+            if (menu) {
+                menu.close()
+            }
+        }
+    }
+    Loader {
+        id: itemMenuLoader
+        active: false
+        sourceComponent: LauncherItemMenu {
+            parent: root.contentItem
+            backend: root.backend
+            actions: root.actions
+        }
     }
 
     // Everything the panel draws, in one sheet that slides up out of the
@@ -189,19 +210,28 @@ Window {
             border.color: Qt.alpha(Kirigami.Theme.textColor, 0.12)
         }
 
-        // The panel's own menu, from a right click on its background.
-        ContextMenu {
+        // The panel's own menu, from a right click on its background; made
+        // on its first use.
+        Loader {
             id: panelMenu
-            ContextMenuItem {
-                text: qsTr("Edit Applications…")
-                onTriggered: root.actions.editApplications()
+            active: false
+            sourceComponent: ContextMenu {
+                parent: sheet
+                ContextMenuItem {
+                    text: qsTr("Edit Applications…")
+                    onTriggered: root.actions.editApplications()
+                }
             }
         }
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.RightButton
             enabled: root.startMode
-            onClicked: panelMenu.popup()
+            onClicked: {
+                panelMenu.active = true
+                const menu = panelMenu.item as ContextMenu
+                menu.popup()
+            }
         }
 
         FocusScope {
