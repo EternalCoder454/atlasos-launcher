@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import org.kde.kirigami as Kirigami
 import Atlas.Ui
@@ -61,7 +62,8 @@ Item {
         }
     }
 
-    implicitHeight: large ? Kirigami.Units.gridUnit * (showActions && quickActions.visibleCount > 0 ? 5.5 : 3.5) : Math.max(AtlasStyle.rowHeight, Kirigami.Units.gridUnit * 2.25)
+    // The card is taller while its actions show (Open is always one).
+    implicitHeight: large ? Kirigami.Units.gridUnit * (quickActions.item !== null && quickActions.visible ? 5.5 : 3.5) : Math.max(AtlasStyle.rowHeight, Kirigami.Units.gridUnit * 2.25)
     implicitWidth: ListView.view ? ListView.view.width : Kirigami.Units.gridUnit * 20
 
     Accessible.role: Accessible.ListItem
@@ -154,50 +156,54 @@ Item {
         }
     }
 
-    // The best match's quick actions, above the row's MouseArea.
-    Row {
+    // The best match's quick actions, above the row's MouseArea. Made only
+    // for the card: the other rows never show them, and rows are made anew
+    // for each query.
+    Loader {
         id: quickActions
-
-        readonly property int visibleCount: (openButton.visible ? 1 : 0) + (pinButton.visible ? 1 : 0) + (folderButton.visible ? 1 : 0) + (copyButton.visible ? 1 : 0)
 
         anchors.top: mainRow.bottom
         anchors.left: parent.left
         anchors.leftMargin: AtlasStyle.spacingLarge + Kirigami.Units.iconSizes.large + AtlasStyle.spacingLarge
-        visible: row.showActions
-        spacing: AtlasStyle.spacingSmall
+        active: row.showActions
 
-        AtlasButton {
-            id: openButton
-            variant: AtlasButton.Prominent
-            text: qsTr("Open")
-            symbol: Symbols.OpenInNew
-            onClicked: row.clicked()
-        }
-        AtlasButton {
-            id: pinButton
-            visible: row.pinned || row.pinnable
-            text: row.pinned ? qsTr("Unpin") : qsTr("Pin")
-            symbol: Symbols.PushPin
-            onClicked: row.pinned ? row.backend.unpin(row.rowId) : row.backend.pin(row.rowId)
-        }
-        AtlasButton {
-            id: folderButton
-            visible: row.uri.length > 0
-            text: qsTr("Show in Folder")
-            symbol: Symbols.FolderOpen
-            onClicked: row.actions.openContainingFolder(row.uri)
-        }
-        AtlasButton {
-            id: copyButton
-            visible: row.uri.length > 0
-            text: qsTr("Copy Path")
-            symbol: Symbols.ContentCopy
-            onClicked: row.actions.copyText(row.localPath(row.uri))
+        sourceComponent: Row {
+            spacing: AtlasStyle.spacingSmall
+
+            AtlasButton {
+                variant: AtlasButton.Prominent
+                text: qsTr("Open")
+                symbol: Symbols.OpenInNew
+                onClicked: row.clicked()
+            }
+            AtlasButton {
+                visible: row.pinned || row.pinnable
+                text: row.pinned ? qsTr("Unpin") : qsTr("Pin")
+                symbol: Symbols.PushPin
+                onClicked: row.pinned ? row.backend.unpin(row.rowId) : row.backend.pin(row.rowId)
+            }
+            AtlasButton {
+                visible: row.uri.length > 0
+                text: qsTr("Show in Folder")
+                symbol: Symbols.FolderOpen
+                onClicked: row.actions.openContainingFolder(row.uri)
+            }
+            AtlasButton {
+                visible: row.uri.length > 0
+                text: qsTr("Copy Path")
+                symbol: Symbols.ContentCopy
+                onClicked: row.actions.copyText(row.localPath(row.uri))
+            }
         }
     }
 
-    AtlasToolTip {
-        text: row.model.title
-        shown: row.commandLine && mouse.containsMouse
+    // The whole command line, for a line elided in the middle.
+    Loader {
+        active: row.commandLine
+        sourceComponent: AtlasToolTip {
+            parent: row
+            text: row.model.title
+            shown: mouse.containsMouse
+        }
     }
 }

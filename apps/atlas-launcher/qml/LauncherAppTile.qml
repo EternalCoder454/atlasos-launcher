@@ -33,7 +33,7 @@ Item {
         anchors.fill: parent
         anchors.margins: AtlasStyle.spacingXSmall
         radius: AtlasStyle.radius
-        color: tile.current || drop.containsDrag ? AtlasStyle.selection
+        color: tile.current || (dropTarget.item as DropArea)?.containsDrag ? AtlasStyle.selection
              : (drag.containsMouse ? AtlasStyle.hover : "transparent")
 
         AtlasFocusRing {
@@ -70,7 +70,7 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        drag.target: tile.reorderable ? dragProxy : null
+        drag.target: dragProxy.item as Item
         drag.threshold: Kirigami.Units.gridUnit / 2
         onClicked: (event) => {
             if (event.button === Qt.RightButton) {
@@ -80,52 +80,70 @@ Item {
             }
         }
         onReleased: {
-            if (dragProxy.Drag.active) {
-                dragProxy.Drag.drop()
+            const proxy = dragProxy.item as Item
+            if (!proxy) {
+                return
             }
-            dragProxy.x = 0
-            dragProxy.y = 0
+            if (proxy.Drag.active) {
+                proxy.Drag.drop()
+            }
+            proxy.x = 0
+            proxy.y = 0
         }
     }
+
+    // The drag and drop parts exist only on tiles that reorder (the pinned
+    // row), and the name's tooltip only on tiles without a label: the app
+    // grid's many tiles never use them.
 
     // What moves under the pointer while dragging: a copy of the icon.
-    Item {
+    Loader {
         id: dragProxy
-        width: tile.width
-        height: tile.height
-        Drag.active: drag.drag.active
-        Drag.keys: ["atlas-launcher-pin"]
-        Drag.hotSpot.x: width / 2
-        Drag.hotSpot.y: height / 2
-        Drag.source: tile
+        active: tile.reorderable
+        sourceComponent: Item {
+            id: proxy
+            width: tile.width
+            height: tile.height
+            Drag.active: drag.drag.active
+            Drag.keys: ["atlas-launcher-pin"]
+            Drag.hotSpot.x: width / 2
+            Drag.hotSpot.y: height / 2
+            Drag.source: tile
 
-        LauncherItemIcon {
-            anchors.centerIn: parent
-            width: tile.iconSize
-            height: width
-            name: tile.model.icon
-            visible: dragProxy.Drag.active
-            opacity: 0.8
-        }
-    }
-
-    DropArea {
-        id: drop
-        anchors.fill: parent
-        enabled: tile.reorderable
-        keys: ["atlas-launcher-pin"]
-        onDropped: (event) => {
-            // The proxy's Drag.source is the tile it came from.
-            const source = event.source as LauncherAppTile
-            if (source && source !== tile) {
-                tile.dropped(source.rowId, tile.index)
-                event.accept()
+            LauncherItemIcon {
+                anchors.centerIn: parent
+                width: tile.iconSize
+                height: width
+                name: tile.model.icon
+                visible: proxy.Drag.active
+                opacity: 0.8
             }
         }
     }
 
-    AtlasToolTip {
-        text: tile.model.title
-        shown: !tile.showLabel && (drag.containsMouse || tile.activeFocus)
+    Loader {
+        id: dropTarget
+        anchors.fill: parent
+        active: tile.reorderable
+        sourceComponent: DropArea {
+            keys: ["atlas-launcher-pin"]
+            onDropped: (event) => {
+                // The proxy's Drag.source is the tile it came from.
+                const source = event.source as LauncherAppTile
+                if (source && source !== tile) {
+                    tile.dropped(source.rowId, tile.index)
+                    event.accept()
+                }
+            }
+        }
+    }
+
+    Loader {
+        active: !tile.showLabel
+        sourceComponent: AtlasToolTip {
+            parent: tile
+            text: tile.model.title
+            shown: drag.containsMouse || tile.activeFocus
+        }
     }
 }
