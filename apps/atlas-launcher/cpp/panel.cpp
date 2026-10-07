@@ -192,7 +192,8 @@ void Panel::place(const QString &mode, const DockAnchor &anchor)
         int x = area.center().x() - size.width() / 2;
         int y = start ? area.bottom() - kEdgeMargin - size.height() : area.top() + int(area.height() * kSearchTop);
         if (start && screen && anchor.rect.isValid()) {
-            x = std::clamp(anchor.rect.center().x() - size.width() / 2, area.left() + kEdgeMargin, area.right() - kEdgeMargin - size.width());
+            // Centred on the screen, above the dock (as on Wayland, below).
+            y = std::max(area.top() + kEdgeMargin, anchor.rect.top() - kEdgeMargin - size.height());
         }
         m_window->setPosition(x, y);
         return;
@@ -207,11 +208,14 @@ void Panel::place(const QString &mode, const DockAnchor &anchor)
     using A = LayerShellQt::Window;
     if (start) {
         if (screen && anchor.rect.isValid()) {
-            // Centred over the dock button, kept on the screen.
+            // Centred on the dock's screen (the dock itself is centred; the
+            // button is its first item, so centring on the button put the
+            // panel off to the left), standing just above the dock, which the
+            // button keeps shown while the panel is open.
             const QRect geo = screen->geometry();
-            const int left = std::clamp(anchor.rect.center().x() - geo.left() - size.width() / 2, kEdgeMargin, std::max(kEdgeMargin, geo.width() - kEdgeMargin - size.width()));
-            m_layer->setAnchors(A::Anchors(A::AnchorBottom | A::AnchorLeft));
-            m_layer->setMargins({left, 0, 0, kEdgeMargin});
+            const int bottom = std::clamp(geo.bottom() + 1 - anchor.rect.top() + kEdgeMargin, kEdgeMargin, std::max(kEdgeMargin, geo.height() / 2));
+            m_layer->setAnchors(A::Anchors(A::AnchorBottom));
+            m_layer->setMargins({0, 0, 0, bottom});
         } else {
             // Bottom centre: anchoring one edge centres along it.
             m_layer->setAnchors(A::Anchors(A::AnchorBottom));

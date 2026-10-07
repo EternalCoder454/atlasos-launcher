@@ -12,7 +12,7 @@ import org.kde.kirigami as Kirigami
 // "Form"): a click, or Meta through plasmashell's "Activate Application
 // Launcher" (this applet provides org.kde.plasma.launchermenu), calls
 // ToggleStart(a{sv}) with the screen and this button's rect, so the panel
-// opens centred above it.
+// opens centred above the dock; and while it is open the dock stays shown.
 PlasmoidItem {
     id: root
 
@@ -27,6 +27,10 @@ PlasmoidItem {
     preferredRepresentation: fullRepresentation
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
     Plasmoid.icon: "atlasos"
+    // The dock auto-hides; while the launcher is open it stays up, as the
+    // taskbar does under Windows' Start: an applet that needs attention keeps
+    // its panel shown.
+    Plasmoid.status: root.launcherOpen ? PlasmaCore.Types.NeedsAttentionStatus : PlasmaCore.Types.ActiveStatus
     toolTipMainText: i18nc("@info:tooltip", "AtlasOS Launcher")
     toolTipSubText: ""
 

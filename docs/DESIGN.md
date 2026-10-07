@@ -120,7 +120,10 @@ with no C++ in the shell:
   open), and provides `org.kde.plasma.launchermenu`, so Plasma's own
   `activateLauncherMenu` reaches it.
 - A click calls `ToggleStart(a{sv})` with its screen and global rect, so the
-  panel opens centred above it.
+  panel opens on that screen, centred, just above the dock.
+- While the launcher is open (`Visible`), its status is NeedsAttention, so
+  the auto-hiding dock stays shown under the panel, as the taskbar does
+  under Windows' Start.
 - On load and on every geometry change it calls `SetDockAnchor(a{sv})`, so
   Meta opens the panel in the same place.
 - On first load it hands the old launcher's favourites to `ImportPins(as)`.
