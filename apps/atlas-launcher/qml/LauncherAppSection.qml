@@ -1,6 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
-import Atlas.Ui
+import Telamon.Ui
 
 // One group of the Start page's app grid: its heading (a kind, or a letter
 // that opens the jump-to-letter grid) over the apps as labelled tiles.
@@ -41,26 +41,26 @@ FocusScope {
         grid.forceActiveFocus(top ? Qt.TabFocusReason : Qt.BacktabFocusReason)
     }
 
-    implicitHeight: header.height + AtlasStyle.spacingSmall + grid.height
+    implicitHeight: header.height + TelamonStyle.spacingSmall + grid.height
 
     Item {
         id: header
         width: parent.width
         height: Math.max(label.implicitHeight, letterButton.implicitHeight)
 
-        AtlasLabel {
+        TelamonLabel {
             id: label
             anchors.verticalCenter: parent.verticalCenter
             visible: !section.letterHeader
             text: section.title
-            textStyle: AtlasLabel.Caption
+            textStyle: TelamonLabel.Caption
             font.weight: Font.DemiBold
         }
-        AtlasButton {
+        TelamonButton {
             id: letterButton
             anchors.verticalCenter: parent.verticalCenter
             visible: section.letterHeader
-            variant: AtlasButton.Ghost
+            variant: TelamonButton.Ghost
             text: section.title
             Accessible.name: qsTr("%1, jump to letter").arg(section.title)
             onClicked: section.headerClicked()
@@ -73,7 +73,7 @@ FocusScope {
         readonly property int rows: Math.ceil(count / section.columns)
 
         anchors.top: header.bottom
-        anchors.topMargin: AtlasStyle.spacingSmall
+        anchors.topMargin: TelamonStyle.spacingSmall
         width: parent.width
         height: rows * cellHeight
         interactive: false

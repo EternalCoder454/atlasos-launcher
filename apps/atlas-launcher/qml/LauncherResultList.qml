@@ -2,7 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Templates as T
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // The ranked list while the user types. The first row is the top hit, drawn
 // larger. The highlighted row stays put when late results (KRunner, files)
@@ -94,7 +94,7 @@ ListView {
     Accessible.role: Accessible.List
     Accessible.name: qsTr("Results")
 
-    T.ScrollBar.vertical: AtlasScrollBar {}
+    T.ScrollBar.vertical: TelamonScrollBar {}
 
     // As on the Start page: even wheel steps, pixel scrolling for smooth wheels.
     Kirigami.WheelHandler {

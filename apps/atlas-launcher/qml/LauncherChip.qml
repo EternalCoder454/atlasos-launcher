@@ -1,6 +1,6 @@
 import QtQuick
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // A recent app or file on the Start page: a small pill with its icon and
 // name (Spotlight's quiet suggestions rather than a "Recommended" block).
@@ -17,8 +17,8 @@ FocusScope {
     signal menuRequested(real x, real y)
 
     // Flow places items by their size, not their implicit size.
-    implicitHeight: Math.max(AtlasStyle.controlHeight, Kirigami.Units.gridUnit * 1.9)
-    implicitWidth: Math.min(Kirigami.Units.gridUnit * 12, icon.width + content.spacing + name.implicitWidth + AtlasStyle.spacingLarge * 2)
+    implicitHeight: Math.max(TelamonStyle.controlHeight, Kirigami.Units.gridUnit * 1.9)
+    implicitWidth: Math.min(Kirigami.Units.gridUnit * 12, icon.width + content.spacing + name.implicitWidth + TelamonStyle.spacingLarge * 2)
     width: implicitWidth
     height: implicitHeight
     activeFocusOnTab: true
@@ -35,12 +35,12 @@ FocusScope {
 
     Rectangle {
         anchors.fill: parent
-        radius: AtlasStyle.radiusPill
-        color: mouse.pressed ? AtlasStyle.pressed : (mouse.containsMouse ? AtlasStyle.hover : Qt.alpha(Kirigami.Theme.textColor, 0.05))
+        radius: TelamonStyle.radiusPill
+        color: mouse.pressed ? TelamonStyle.pressed : (mouse.containsMouse ? TelamonStyle.hover : Qt.alpha(Kirigami.Theme.textColor, 0.05))
         border.width: 1
-        border.color: AtlasStyle.separator
+        border.color: TelamonStyle.separator
 
-        AtlasFocusRing {
+        TelamonFocusRing {
             anchors.fill: parent
             radius: parent.radius
             shown: chip.activeFocus
@@ -50,9 +50,9 @@ FocusScope {
     Row {
         id: content
         anchors.verticalCenter: parent.verticalCenter
-        x: AtlasStyle.spacingLarge
-        width: chip.width - AtlasStyle.spacingLarge * 2
-        spacing: AtlasStyle.spacing
+        x: TelamonStyle.spacingLarge
+        width: chip.width - TelamonStyle.spacingLarge * 2
+        spacing: TelamonStyle.spacing
 
         LauncherItemIcon {
             id: icon
@@ -61,7 +61,7 @@ FocusScope {
             height: width
             name: chip.model.icon
         }
-        AtlasLabel {
+        TelamonLabel {
             id: name
             anchors.verticalCenter: parent.verticalCenter
             width: Math.min(implicitWidth, content.width - icon.width - content.spacing)
@@ -87,7 +87,7 @@ FocusScope {
         }
     }
 
-    AtlasToolTip {
+    TelamonToolTip {
         text: chip.model.subtitle.length > 0 ? chip.model.subtitle : chip.model.title
         shown: mouse.containsMouse
     }

@@ -8,7 +8,7 @@
 #
 # Build context: the repo root (only packaging/atlas-launcher.spec is read).
 # ATLAS_FRAMEWORK_REF is the tag in Cargo.toml (ci/framework-ref.sh prints it).
-# atlas-ui, which the app builds against, is in no repository: the first stage
+# telamon-ui, which the app builds against, is in no repository: the first stage
 # builds atlas-framework's RPMs from that tag.
 # The image is public once pushed: nothing secret may go in (ci/secret-check.sh
 # runs before every push).
@@ -44,11 +44,11 @@ RUN --mount=type=cache,target=/var/cache/libdnf5,sharing=locked \
         clippy rustfmt mold ccache ShellCheck desktop-file-utils \
         dbus-daemon xorg-x11-server-Xvfb qt6-qtbase-gui kf6-qqc2-desktop-style \
         qt6-qtdeclarative-devel \
-        /atlas-rpms/atlas-ui-[0-9]*.rpm /atlas-rpms/atlas-symbols-fonts-[0-9]*.rpm && \
+        /atlas-rpms/telamon-ui-[0-9]*.rpm /atlas-rpms/telamon-symbols-fonts-[0-9]*.rpm && \
     dnf -y --setopt=keepcache=1 builddep /tmp/atlas-launcher.spec && \
     rm -rf /atlas-rpms /tmp/atlas-launcher.spec
 # atlas-framework's source, for its lint tools (tools/lint-app.sh,
-# tools/check-app-names.sh read ui/ too), at the same tag as atlas-ui.
+# tools/check-app-names.sh read ui/ too), at the same tag as telamon-ui.
 COPY --from=framework /framework /opt/atlas-framework
 ENV ATLAS_FRAMEWORK=/opt/atlas-framework
 # dev-image.yml compares this with ci/image-tag.sh to see whether the published

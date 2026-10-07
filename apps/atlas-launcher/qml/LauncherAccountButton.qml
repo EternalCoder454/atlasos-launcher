@@ -1,6 +1,6 @@
 import QtQuick
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // The account button beside the search field: the user's picture (or
 // initials) in a circle; opens Settings' Users page.
@@ -9,7 +9,7 @@ FocusScope {
 
     required property var actions
 
-    implicitWidth: Kirigami.Units.iconSizes.medium + AtlasStyle.spacing
+    implicitWidth: Kirigami.Units.iconSizes.medium + TelamonStyle.spacing
     implicitHeight: implicitWidth
     activeFocusOnTab: true
 
@@ -22,16 +22,16 @@ FocusScope {
 
     Rectangle {
         anchors.fill: parent
-        radius: AtlasStyle.radiusPill
-        color: mouse.pressed ? AtlasStyle.pressed : (mouse.containsMouse ? AtlasStyle.hover : "transparent")
-        AtlasFocusRing {
+        radius: TelamonStyle.radiusPill
+        color: mouse.pressed ? TelamonStyle.pressed : (mouse.containsMouse ? TelamonStyle.hover : "transparent")
+        TelamonFocusRing {
             anchors.fill: parent
             radius: parent.radius
             shown: account.activeFocus
         }
     }
 
-    AtlasAvatar {
+    TelamonAvatar {
         anchors.centerIn: parent
         size: Kirigami.Units.iconSizes.medium
         name: account.actions.userName
@@ -46,7 +46,7 @@ FocusScope {
         onClicked: account.actions.openUserSettings()
     }
 
-    AtlasToolTip {
+    TelamonToolTip {
         text: account.actions.userName
         shown: mouse.containsMouse
     }

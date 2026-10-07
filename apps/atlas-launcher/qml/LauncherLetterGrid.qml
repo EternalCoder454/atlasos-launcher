@@ -1,6 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
-import Atlas.Ui
+import Telamon.Ui
 
 // The jump-to-letter grid, opened from an A–Z header: # and A to Z, with the
 // letters that have no apps dimmed. Arrow keys move, Enter jumps, Esc closes.
@@ -43,26 +43,26 @@ FocusScope {
 
     Rectangle {
         anchors.fill: parent
-        radius: AtlasStyle.radiusLarge
-        color: AtlasStyle.floatingBackground
+        radius: TelamonStyle.radiusLarge
+        color: TelamonStyle.floatingBackground
     }
 
     Grid {
         anchors.centerIn: parent
         columns: grid.columns
-        spacing: AtlasStyle.spacingSmall
+        spacing: TelamonStyle.spacingSmall
 
         Repeater {
             id: repeater
             model: grid.all
 
-            AtlasButton {
+            TelamonButton {
                 required property int index
                 required property string modelData
                 readonly property bool has: grid.letters.indexOf(modelData) >= 0
 
                 text: modelData
-                variant: AtlasButton.Ghost
+                variant: TelamonButton.Ghost
                 enabled: has
                 width: height * 1.4
                 Accessible.name: modelData === "#" ? qsTr("Numbers and symbols") : modelData

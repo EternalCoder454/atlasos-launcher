@@ -1,7 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // The launcher's panel: one window, created hidden at login and shown by
 // Meta, the dock button or Alt+Space (docs/DESIGN.md, "Form"). Panel (C++)
@@ -31,7 +31,7 @@ Window {
     // Read by Panel before each show.
     readonly property size startSize: Qt.size(Kirigami.Units.gridUnit * 36, Kirigami.Units.gridUnit * 36)
     readonly property size searchSize: Qt.size(Kirigami.Units.gridUnit * 38, Kirigami.Units.gridUnit * 26)
-    readonly property real cornerRadius: AtlasStyle.radiusLarge * 2
+    readonly property real cornerRadius: TelamonStyle.radiusLarge * 2
     // The transparency switch: no blur and an opaque panel when it is off.
     readonly property bool blurEnabled: Appearance.effective
 
@@ -98,7 +98,7 @@ Window {
         field.forceActiveFocus(Qt.BacktabFocusReason)
     }
 
-    title: AtlasApp.name
+    title: TelamonApp.name
     visible: false
     color: "transparent"
     flags: Qt.FramelessWindowHint
@@ -173,7 +173,7 @@ Window {
 
     // Everything the panel draws, in one sheet that slides up out of the
     // dock as the panel opens (Start; Search fades in place). Reduced motion
-    // (AtlasStyle durations of 0) shows it at once.
+    // (TelamonStyle durations of 0) shows it at once.
     Item {
         id: sheet
         width: parent.width
@@ -193,14 +193,14 @@ Window {
                 target: slide
                 property: "y"
                 to: 0
-                duration: AtlasStyle.durationLong
+                duration: TelamonStyle.durationLong
                 easing.type: Easing.OutCubic
             }
             NumberAnimation {
                 target: sheet
                 property: "opacity"
                 to: 1
-                duration: AtlasStyle.duration
+                duration: TelamonStyle.duration
                 easing.type: Easing.OutCubic
             }
         }
@@ -208,7 +208,7 @@ Window {
         Rectangle {
             anchors.fill: parent
             radius: root.cornerRadius
-            color: AtlasStyle.floatingBackground
+            color: TelamonStyle.floatingBackground
             border.width: 1
             border.color: Qt.alpha(Kirigami.Theme.textColor, 0.12)
         }
@@ -241,7 +241,7 @@ Window {
             id: content
 
             anchors.fill: parent
-            anchors.margins: AtlasStyle.spacingXLarge
+            anchors.margins: TelamonStyle.spacingXLarge
             focus: true
 
             Keys.onEscapePressed: {
@@ -280,7 +280,7 @@ Window {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     visible: root.startMode
-                    spacing: AtlasStyle.spacingSmall
+                    spacing: TelamonStyle.spacingSmall
 
                     LauncherAccountButton {
                         anchors.verticalCenter: parent.verticalCenter
@@ -298,15 +298,15 @@ Window {
 
                 anchors.top: parent.top
                 anchors.left: parent.left
-                width: root.startMode ? parent.width - headerButtons.width - AtlasStyle.spacing : parent.width
+                width: root.startMode ? parent.width - headerButtons.width - TelamonStyle.spacing : parent.width
                 implicitHeight: Kirigami.Units.gridUnit * 2.6
-                font.pointSize: AtlasStyle.fontSizeHeading
+                font.pointSize: TelamonStyle.fontSizeHeading
                 focus: true
                 background: Rectangle {
-                    radius: AtlasStyle.radiusSmall
+                    radius: TelamonStyle.radiusSmall
                     color: Qt.alpha(Kirigami.Theme.textColor, 0.06)
                     border.width: 1
-                    border.color: field.activeFocus ? AtlasStyle.focus : AtlasStyle.separator
+                    border.color: field.activeFocus ? TelamonStyle.focus : TelamonStyle.separator
                 }
                 placeholderText: qsTr("Search apps, settings and files")
                 // A huge paste is cut here; the engine reads far less.
@@ -343,7 +343,7 @@ Window {
                 id: body
 
                 anchors.top: field.bottom
-                anchors.topMargin: AtlasStyle.spacingLarge
+                anchors.topMargin: TelamonStyle.spacingLarge
                 anchors.bottom: parent.bottom
                 width: parent.width
 
@@ -383,20 +383,20 @@ Window {
                     function onCountChanged() { resultList.pinsVersion += 1 }
                 }
 
-                AtlasLabel {
+                TelamonLabel {
                     anchors.centerIn: parent
                     visible: root.searching && root.answered && resultList.count === 0
                     text: qsTr("No results")
-                    textStyle: AtlasLabel.Caption
+                    textStyle: TelamonLabel.Caption
                 }
 
                 // Why the last row did nothing; fades with the next show.
-                AtlasLabel {
+                TelamonLabel {
                     id: failure
                     anchors.bottom: parent.bottom
                     anchors.horizontalCenter: parent.horizontalCenter
                     visible: false
-                    textStyle: AtlasLabel.Caption
+                    textStyle: TelamonLabel.Caption
                     Accessible.role: Accessible.AlertMessage
                     onVisibleChanged: if (visible) Accessible.announce(text)
                 }

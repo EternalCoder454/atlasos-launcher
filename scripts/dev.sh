@@ -11,7 +11,7 @@
 # The image is built from ci/Containerfile on first use, and again whenever the
 # Containerfile, the spec's BuildRequires or the atlas-framework tag in
 # Cargo.toml change (ci/image-tag.sh). It needs network access: it builds
-# atlas-ui from atlas-framework's tag. ATLAS_FRAMEWORK_REF=<tag or branch>
+# telamon-ui from atlas-framework's tag. ATLAS_FRAMEWORK_REF=<tag or branch>
 # builds from another ref (the image is rebuilt when it changes).
 set -euo pipefail
 

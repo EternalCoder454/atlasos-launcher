@@ -18,7 +18,7 @@ One launcher replaces two things on AtlasOS:
 | Baloo file search (indexer removed from AtlasOS) | AtlasOS Explorer's file index over D-Bus |
 
 **Start mode**, search first (Spotlight's flow, with the browsing Windows
-does best), in a blurred, rounded Atlas.Ui panel above the dock. The
+does best), in a blurred, rounded Telamon.Ui panel above the dock. The
 research behind it (2026-10-06): people launch by Meta, two or three letters
 and Enter; they hate ads and "Recommended" blocks, web results ahead of their
 own, a top hit that changes under Enter, and a launcher that loses its app
@@ -178,7 +178,7 @@ component `net.eterneon.atlas.launcher`:
 - `toggle-search`: Alt+Space, with Alt+F2 as its alternate.
 - `toggle-search-meta-s`: Meta+S.
 
-The GlobalShortcuts portal (Atlas.Ui's AtlasGlobalShortcut) is not used: it
+The GlobalShortcuts portal (Telamon.Ui's TelamonGlobalShortcut) is not used: it
 asks the user to approve the binding, which a system launcher must not do.
 
 **Meta** is plasmashell's "Activate Application Launcher" global shortcut

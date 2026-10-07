@@ -44,14 +44,14 @@ BuildRequires:  cmake(KF6Config)
 BuildRequires:  cmake(KF6Service)
 BuildRequires:  cmake(KF6CoreAddons)
 BuildRequires:  cmake(LayerShellQt)
-# QML modules qmlcachegen resolves at build time (not linked). atlas-ui comes
+# QML modules qmlcachegen resolves at build time (not linked). telamon-ui comes
 # from atlas-framework, which is in no repository (the dev image has it).
 BuildRequires:  kf6-kirigami-devel
-BuildRequires:  atlas-ui >= 1.4.0
+BuildRequires:  telamon-ui >= 2.0.0
 
 Requires:       kf6-kirigami
-# Atlas.Ui, the shared look (atlas-framework)
-Requires:       atlas-ui >= 1.4.0
+# Telamon.Ui, the shared look (atlas-framework)
+Requires:       telamon-ui >= 2.0.0
 Requires:       kf6-qqc2-desktop-style
 Requires:       qt6-qtdeclarative
 Requires:       qt6-qtsvg

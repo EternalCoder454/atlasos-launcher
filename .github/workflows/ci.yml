@@ -5,7 +5,7 @@ name: CI
 #     -> lint  (fmt, qmllint, Atlas rules, shellcheck, desktop files)
 #          -> clippy | test | rpm     (in parallel)
 # Everything runs in ghcr.io/eternalcoder454/atlas-launcher-dev, which holds the
-# build dependencies and atlas-ui, so no job installs or builds them.
+# build dependencies and telamon-ui, so no job installs or builds them.
 
 on:
   push:
@@ -102,7 +102,7 @@ jobs:
         run: qmllint-qt6 apps/atlas-launcher/qml/*.qml plasmoid/*/contents/ui/*.qml
 
       # atlas-framework's design rules (no default buttons, no QML file named
-      # like an Atlas.Ui type), from the framework tag baked into the image.
+      # like a Telamon.Ui type), from the framework tag baked into the image.
       - name: Atlas design rules
         run: |
           "$ATLAS_FRAMEWORK/tools/lint-app.sh" .

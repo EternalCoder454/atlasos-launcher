@@ -249,7 +249,7 @@ void Panel::updateBlur()
     if (!m_window || !m_window->isVisible()) {
         return;
     }
-    // The transparency switch (Atlas.Ui) turns blur off with the translucency.
+    // The transparency switch (Telamon.Ui) turns blur off with the translucency.
     const bool blur = m_window->property("blurEnabled").toBool();
     if (!blur) {
         KWindowEffects::enableBlurBehind(m_window, false);

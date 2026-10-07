@@ -1,7 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQml.Models
-import Atlas.Ui
+import Telamon.Ui
 
 // The context menu of a row (docs/DESIGN.md, the table under "Everywhere").
 // `openFor` reads what the row is from the backend each time it opens.

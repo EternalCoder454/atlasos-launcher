@@ -5,11 +5,11 @@
 mod backend;
 mod state;
 
-atlas_framework_ui::app! {
+telamon_framework_ui::app! {
     name: "AtlasOS Launcher",
     id: "net.eterneon.atlas.launcher",
     repo: "atlasos-launcher",
-    ui: "1.4.0",
+    ui: "2.0.0",
 }
 
 use std::ffi::c_void;

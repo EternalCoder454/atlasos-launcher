@@ -10,7 +10,7 @@
 #include "panel.h"
 #include "runners.h"
 
-#include <atlas/app.h>
+#include <telamon/app.h>
 
 #include <KDBusService>
 #include <KGlobalAccel>
@@ -153,7 +153,7 @@ void registerShortcuts(Panel *panel)
 
 int main(int argc, char *argv[])
 {
-    atlas_app_init();
+    telamon_app_init();
     // Drawn on the CPU like the other Atlas apps unless QT_QUICK_BACKEND says
     // otherwise; the P phase measures software against the GPU.
     if (qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND")) {
@@ -165,7 +165,7 @@ int main(int argc, char *argv[])
     QApplication::setQuitOnLastWindowClosed(false);
     QCoreApplication::setQuitLockEnabled(false);
     QApplication app(argc, argv);
-    atlas_app_ready();
+    telamon_app_ready();
 
     QCommandLineParser parser;
     addOptions(parser);

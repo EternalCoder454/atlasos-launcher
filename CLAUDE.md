@@ -62,7 +62,7 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
   Results come back with `qt_thread().queue`, tagged with the query serial.
 - **Idle means idle.** While hidden there are no timers and no polling (one
   single-shot memory trim 60 s after a hide is the only exception).
-- **Atlas.Ui is the installed `atlas-ui` package.** Use its controls, never
+- **Telamon.Ui is the installed `telamon-ui` package.** Use its controls, never
   stock QQC2 or Kirigami buttons. Ask the "AtlasOS Framework" session for
   what's missing. A local stand-in is named `Launcher<Name>`, so
   `check-app-names.sh` never sees a clash.
@@ -106,7 +106,7 @@ through `~/.claude/heavy/run.sh` with `-j 8` or less.
 ## Moving the atlas-framework pin
 
 Change `tag` in `Cargo.toml`, then
-`scripts/dev.sh cargo update -p atlas-framework-ui`. CI and the dev image
+`scripts/dev.sh cargo update -p telamon-framework-ui`. CI and the dev image
 follow the tag by themselves (`ci/framework-ref.sh`). When the app uses
-something new in Atlas.Ui, raise `ui:` in `apps/atlas-launcher/src/lib.rs`
-and `atlas-ui >=` in the spec (Requires and BuildRequires) to match.
+something new in Telamon.Ui, raise `ui:` in `apps/atlas-launcher/src/lib.rs`
+and `telamon-ui >=` in the spec (Requires and BuildRequires) to match.

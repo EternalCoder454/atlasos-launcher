@@ -1,7 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // One row of a list: icon, title and subtitle, and its kind on the right.
 // The top hit (`large`) is the best-match card: taller, with its quick
@@ -63,7 +63,7 @@ Item {
     }
 
     // The card is taller while its actions show (Open is always one).
-    implicitHeight: large ? Kirigami.Units.gridUnit * (quickActions.item !== null && quickActions.visible ? 5.5 : 3.5) : Math.max(AtlasStyle.rowHeight, Kirigami.Units.gridUnit * 2.25)
+    implicitHeight: large ? Kirigami.Units.gridUnit * (quickActions.item !== null && quickActions.visible ? 5.5 : 3.5) : Math.max(TelamonStyle.rowHeight, Kirigami.Units.gridUnit * 2.25)
     implicitWidth: ListView.view ? ListView.view.width : Kirigami.Units.gridUnit * 20
 
     Accessible.role: Accessible.ListItem
@@ -75,14 +75,14 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        anchors.leftMargin: AtlasStyle.spacingXSmall
-        anchors.rightMargin: AtlasStyle.spacingXSmall
-        radius: row.large ? AtlasStyle.radiusLarge : AtlasStyle.radius
-        color: row.current ? AtlasStyle.selection : (mouse.containsMouse ? AtlasStyle.hover : (row.large ? Qt.alpha(Kirigami.Theme.textColor, 0.04) : "transparent"))
+        anchors.leftMargin: TelamonStyle.spacingXSmall
+        anchors.rightMargin: TelamonStyle.spacingXSmall
+        radius: row.large ? TelamonStyle.radiusLarge : TelamonStyle.radius
+        color: row.current ? TelamonStyle.selection : (mouse.containsMouse ? TelamonStyle.hover : (row.large ? Qt.alpha(Kirigami.Theme.textColor, 0.04) : "transparent"))
         border.width: row.large ? 1 : 0
-        border.color: AtlasStyle.separator
+        border.color: TelamonStyle.separator
 
-        AtlasFocusRing {
+        TelamonFocusRing {
             anchors.fill: parent
             radius: parent.radius + gap
             shown: row.activeFocus
@@ -95,9 +95,9 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         height: row.large ? Kirigami.Units.gridUnit * 3.5 : parent.height
-        anchors.leftMargin: AtlasStyle.spacingLarge
-        anchors.rightMargin: AtlasStyle.spacingLarge
-        spacing: AtlasStyle.spacingLarge
+        anchors.leftMargin: TelamonStyle.spacingLarge
+        anchors.rightMargin: TelamonStyle.spacingLarge
+        spacing: TelamonStyle.spacingLarge
 
         LauncherItemIcon {
             id: icon
@@ -111,33 +111,33 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: parent.width - icon.width - kind.width - parent.spacing * 2
 
-            AtlasLabel {
+            TelamonLabel {
                 width: parent.width
                 text: row.model.title
                 textFormat: Text.PlainText
-                textStyle: row.large ? AtlasLabel.Heading : AtlasLabel.Body
+                textStyle: row.large ? TelamonLabel.Heading : TelamonLabel.Body
                 elide: row.commandLine ? Text.ElideMiddle : Text.ElideRight
                 maximumLineCount: 1
             }
-            AtlasLabel {
+            TelamonLabel {
                 width: parent.width
                 visible: text.length > 0
                 text: row.model.subtitle
                 textFormat: Text.PlainText
-                textStyle: AtlasLabel.Caption
+                textStyle: TelamonLabel.Caption
                 elide: Text.ElideMiddle
                 maximumLineCount: 1
             }
         }
 
-        AtlasLabel {
+        TelamonLabel {
             id: kind
             anchors.verticalCenter: parent.verticalCenter
             visible: row.showKind
             width: visible ? implicitWidth : 0
             text: row.kindLabel
             textFormat: Text.PlainText
-            textStyle: AtlasLabel.Caption
+            textStyle: TelamonLabel.Caption
         }
     }
 
@@ -164,31 +164,31 @@ Item {
 
         anchors.top: mainRow.bottom
         anchors.left: parent.left
-        anchors.leftMargin: AtlasStyle.spacingLarge + Kirigami.Units.iconSizes.large + AtlasStyle.spacingLarge
+        anchors.leftMargin: TelamonStyle.spacingLarge + Kirigami.Units.iconSizes.large + TelamonStyle.spacingLarge
         active: row.showActions
 
         sourceComponent: Row {
-            spacing: AtlasStyle.spacingSmall
+            spacing: TelamonStyle.spacingSmall
 
-            AtlasButton {
-                variant: AtlasButton.Prominent
+            TelamonButton {
+                variant: TelamonButton.Prominent
                 text: qsTr("Open")
                 symbol: Symbols.OpenInNew
                 onClicked: row.clicked()
             }
-            AtlasButton {
+            TelamonButton {
                 visible: row.pinned || row.pinnable
                 text: row.pinned ? qsTr("Unpin") : qsTr("Pin")
                 symbol: Symbols.PushPin
                 onClicked: row.pinned ? row.backend.unpin(row.rowId) : row.backend.pin(row.rowId)
             }
-            AtlasButton {
+            TelamonButton {
                 visible: row.uri.length > 0
                 text: qsTr("Show in Folder")
                 symbol: Symbols.FolderOpen
                 onClicked: row.actions.openContainingFolder(row.uri)
             }
-            AtlasButton {
+            TelamonButton {
                 visible: row.uri.length > 0
                 text: qsTr("Copy Path")
                 symbol: Symbols.ContentCopy
@@ -200,7 +200,7 @@ Item {
     // The whole command line, for a line elided in the middle.
     Loader {
         active: row.commandLine
-        sourceComponent: AtlasToolTip {
+        sourceComponent: TelamonToolTip {
             parent: row
             text: row.model.title
             shown: mouse.containsMouse

@@ -1,7 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // An app tile: icon over its name, or the icon alone (`showLabel: false`, the
 // pinned row) with the name in a tooltip. Pinned tiles drag onto each other
@@ -40,17 +40,17 @@ Item {
             Rectangle {
                 id: highlight
                 anchors.fill: parent
-                anchors.margins: AtlasStyle.spacingXSmall
-                radius: AtlasStyle.radius
-                color: tile.current || (dropTarget.item as DropArea)?.containsDrag ? AtlasStyle.selection
-                     : (drag.containsMouse ? AtlasStyle.hover : "transparent")
+                anchors.margins: TelamonStyle.spacingXSmall
+                radius: TelamonStyle.radius
+                color: tile.current || (dropTarget.item as DropArea)?.containsDrag ? TelamonStyle.selection
+                     : (drag.containsMouse ? TelamonStyle.hover : "transparent")
 
                 // The focus ring, made when the tile takes the focus and kept
                 // until it has faded out.
                 Loader {
                     anchors.fill: parent
                     active: tile.activeFocus || ((item as Item)?.visible ?? false)
-                    sourceComponent: AtlasFocusRing {
+                    sourceComponent: TelamonFocusRing {
                         radius: highlight.radius + gap
                         // Bound once made, so it fades in as it does when
                         // the focus comes to a tile that has its ring.
@@ -61,8 +61,8 @@ Item {
 
             Column {
                 anchors.centerIn: parent
-                width: parent.width - AtlasStyle.spacingLarge * 2
-                spacing: AtlasStyle.spacingSmall
+                width: parent.width - TelamonStyle.spacingLarge * 2
+                spacing: TelamonStyle.spacingSmall
 
                 LauncherItemIcon {
                     anchors.horizontalCenter: parent.horizontalCenter
@@ -70,7 +70,7 @@ Item {
                     height: width
                     name: tile.model.icon
                 }
-                AtlasLabel {
+                TelamonLabel {
                     width: parent.width
                     visible: tile.showLabel
                     horizontalAlignment: Text.AlignHCenter
@@ -156,7 +156,7 @@ Item {
 
             Loader {
                 active: !tile.showLabel
-                sourceComponent: AtlasToolTip {
+                sourceComponent: TelamonToolTip {
                     parent: tile
                     text: tile.model.title
                     shown: drag.containsMouse || tile.activeFocus

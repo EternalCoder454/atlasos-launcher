@@ -1,6 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
-import Atlas.Ui
+import Telamon.Ui
 
 // The power button beside the search field. Its menu's choices run at once
 // (the search results' session commands ask through Plasma's prompt

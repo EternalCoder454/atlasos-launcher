@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Templates as T
 import QtCore
 import org.kde.kirigami as Kirigami
-import Atlas.Ui
+import Telamon.Ui
 
 // Start's page before anything is typed (docs/DESIGN.md, "Start mode"):
 // search first, then quiet suggestions, then browsing. One scrolling page:
@@ -189,7 +189,7 @@ FocusScope {
         clip: true
         contentHeight: column.implicitHeight
         boundsBehavior: Flickable.StopAtBounds
-        T.ScrollBar.vertical: AtlasScrollBar {}
+        T.ScrollBar.vertical: TelamonScrollBar {}
 
         // Kirigami's wheel handling: even steps for a notched wheel, pixel
         // scrolling for a free-spinning or high-resolution one (both of the
@@ -206,17 +206,17 @@ FocusScope {
             }
             const p = item.mapToItem(column, 0, 0)
             if (p.y < contentY) {
-                contentY = Math.max(0, p.y - AtlasStyle.spacing)
+                contentY = Math.max(0, p.y - TelamonStyle.spacing)
             } else if (p.y + item.height > contentY + height) {
-                contentY = Math.min(contentHeight - height, p.y + item.height - height + AtlasStyle.spacing)
+                contentY = Math.min(contentHeight - height, p.y + item.height - height + TelamonStyle.spacing)
             }
         }
 
         Column {
             id: column
             width: flick.width
-            spacing: AtlasStyle.spacingLarge
-            bottomPadding: AtlasStyle.spacingLarge
+            spacing: TelamonStyle.spacingLarge
+            bottomPadding: TelamonStyle.spacingLarge
 
             // --- Pinned: one quiet row of icons ---
             ListView {
@@ -295,7 +295,7 @@ FocusScope {
 
                 width: parent.width
                 visible: page.showRecent
-                spacing: AtlasStyle.spacing
+                spacing: TelamonStyle.spacing
                 Accessible.role: Accessible.Grouping
                 Accessible.name: qsTr("Recent")
 
@@ -330,13 +330,13 @@ FocusScope {
                 width: parent.width
                 height: Math.max(appsTitle.implicitHeight, viewSwitch.implicitHeight)
 
-                AtlasLabel {
+                TelamonLabel {
                     id: appsTitle
                     anchors.verticalCenter: parent.verticalCenter
                     text: qsTr("Apps")
-                    textStyle: AtlasLabel.Heading
+                    textStyle: TelamonLabel.Heading
                 }
-                AtlasSegmentedControl {
+                TelamonSegmentedControl {
                     id: viewSwitch
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
@@ -353,7 +353,7 @@ FocusScope {
             Column {
                 id: appsColumn
                 width: parent.width
-                spacing: AtlasStyle.spacingLarge
+                spacing: TelamonStyle.spacingLarge
 
                 Repeater {
                     id: sectionRepeater
@@ -409,11 +409,11 @@ FocusScope {
         gradient: Gradient {
             GradientStop {
                 position: 0
-                color: Qt.alpha(AtlasStyle.floatingBackground, 0)
+                color: Qt.alpha(TelamonStyle.floatingBackground, 0)
             }
             GradientStop {
                 position: 1
-                color: AtlasStyle.floatingBackground
+                color: TelamonStyle.floatingBackground
             }
         }
         rotation: atTop ? 180 : 0
