@@ -113,13 +113,25 @@ FocusScope {
         pinList.currentIndex = -1
     }
 
+    // The first recent chip shown, or null. The Flow's children include its
+    // two Repeaters, which can't take focus, so chips are told by rowId.
+    function firstChip(): Item {
+        if (!page.showRecent)
+            return null
+        for (const c of chips.children) {
+            if (c.visible && c.rowId !== undefined)
+                return c
+        }
+        return null
+    }
+
     // Down from the field: the first region that has something.
     function focusFirst() {
         if (pinList.count > 0) {
             pinList.currentIndex = Math.max(0, pinList.currentIndex)
             pinList.forceActiveFocus(Qt.TabFocusReason)
-        } else if (page.showRecent && chips.children.length > 1) {
-            chips.children[0].forceActiveFocus(Qt.TabFocusReason)
+        } else if (page.firstChip()) {
+            page.firstChip().forceActiveFocus(Qt.TabFocusReason)
         } else {
             page.focusSection(0, true)
         }
@@ -253,8 +265,8 @@ FocusScope {
                 Keys.onEnterPressed: if (currentIndex >= 0) page.backend.activate(1, currentId())
                 Keys.onUpPressed: page.backToField()
                 Keys.onDownPressed: {
-                    if (page.showRecent && chips.children.length > 1) {
-                        chips.children[0].forceActiveFocus(Qt.TabFocusReason)
+                    if (page.firstChip()) {
+                        page.firstChip().forceActiveFocus(Qt.TabFocusReason)
                     } else {
                         page.focusSection(0, true)
                     }
@@ -371,8 +383,8 @@ FocusScope {
                         onFocusedItem: (item) => flick.show(item)
                         onLeaveUp: {
                             if (!page.focusSection(index - 1, false)) {
-                                if (page.showRecent && chips.children.length > 1) {
-                                    chips.children[0].forceActiveFocus(Qt.BacktabFocusReason)
+                                if (page.firstChip()) {
+                                    page.firstChip().forceActiveFocus(Qt.BacktabFocusReason)
                                 } else if (pinList.count > 0) {
                                     pinList.forceActiveFocus(Qt.BacktabFocusReason)
                                 } else {
