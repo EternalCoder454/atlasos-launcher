@@ -1,4 +1,0 @@
-[D-BUS Service]
-Name=net.eterneon.atlas.launcher
-Exec=/usr/bin/atlas-launcher --daemon
-SystemdService=atlas-launcher.service

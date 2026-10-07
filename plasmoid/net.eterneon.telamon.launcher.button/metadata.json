@@ -1,0 +1,23 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "EternalHell"
+            }
+        ],
+        "Category": "Application Launchers",
+        "Description": "Opens the Telamon Launcher",
+        "EnabledByDefault": true,
+        "Icon": "atlasos",
+        "Id": "net.eterneon.telamon.launcher.button",
+        "License": "MIT",
+        "Name": "Telamon Launcher",
+        "Version": "0.1",
+        "Website": "https://github.com/EternalCoder454/atlasos-launcher"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-Provides": [
+        "org.kde.plasma.launchermenu"
+    ]
+}

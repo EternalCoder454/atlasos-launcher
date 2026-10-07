@@ -1,6 +1,6 @@
-# AtlasOS Launcher
+# Telamon Launcher
 
-The Start menu and search of AtlasOS, a Fedora Kinoite 44 bootc image (repo
+The Start menu and search of Telamon OS, a Fedora Kinoite 44 bootc image (repo
 `~/Documents/Projects/AtlasOS/AtlasOS`, read-only from here). It replaces the
 vendored Andromeda Launcher (Meta, the dock's first item) and KRunner
 (Alt+Space). Rust + CXX-Qt + Qt 6.11 Quick + Kirigami on Atlas Framework
@@ -26,7 +26,7 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
 
 - **Build and test inside the dev container**, never on the host:
   `scripts/dev.sh <command>`. Output goes to `/work`
-  (`~/.cache/claude-builds/atlas-launcher`), never into the repo or `/tmp`.
+  (`~/.cache/claude-builds/telamon-launcher`), never into the repo or `/tmp`.
   Use a separate target dir per agent or task
   (`CARGO_TARGET_DIR=/work/target/<name> scripts/dev.sh ...`).
 - **Never run the launcher, plasmashell or KWin on the user's display or
@@ -34,7 +34,7 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
   `kwin_wayland --virtual` (layer shell, blur and focus need KWin) or
   `QT_QPA_PLATFORM=offscreen`, in the container, with every `XDG_*_HOME`
   under `/work/xdg/<run>`. Never read or write the user's real
-  `~/.config/atlas-launcher`, `krunnerrc`, `recently-used.xbel` or KActivities data.
+  `~/.config/telamon-launcher`, `krunnerrc`, `recently-used.xbel` or KActivities data.
 - **No shell strings.** Apps start through `KIO::ApplicationLauncherJob`,
   files through `KIO::OpenUrlJob`, and commands through
   `KIO::CommandLauncherJob(executable, args)`. The one exception is "Run in
@@ -45,7 +45,7 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
   Power and session go through logind and ksmserver. Never call
   `atlas-system-helper`.
 - **No network**, except that the web-search row opens the user's browser.
-- **Untrusted input** is checked where it enters, in `atlas-launcher-core`
+- **Untrusted input** is checked where it enters, in `telamon-launcher-core`
   where it can be, with the caps in DESIGN.md "Trust":
   - `recently-used.xbel`;
   - Explorer's file hits;
@@ -62,7 +62,7 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
   Results come back with `qt_thread().queue`, tagged with the query serial.
 - **Idle means idle.** While hidden there are no timers and no polling (one
   single-shot memory trim 60 s after a hide is the only exception).
-- **Atlas.Ui is the installed `atlas-ui` package.** Use its controls, never
+- **Telamon.Ui is the installed `telamon-ui` package.** Use its controls, never
   stock QQC2 or Kirigami buttons. Ask the "AtlasOS Framework" session for
   what's missing. A local stand-in is named `Launcher<Name>`, so
   `check-app-names.sh` never sees a clash.
@@ -85,12 +85,12 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
 | Format | `scripts/dev.sh cargo fmt --all --check` |
 | Lint | `scripts/dev.sh cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | Tests | `scripts/dev.sh cargo test --workspace --locked` |
-| App build | `scripts/dev.sh bash -c 'cmake -S apps/atlas-launcher -B /work/cmake/dev -G Ninja && cmake --build /work/cmake/dev'` |
-| QML lint | `scripts/dev.sh qmllint-qt6 apps/atlas-launcher/qml/*.qml plasmoid/*/contents/ui/*.qml` |
-| Atlas checks | `scripts/dev.sh bash -c '$ATLAS_FRAMEWORK/tools/lint-app.sh . && $ATLAS_FRAMEWORK/tools/check-app-names.sh .'` |
+| App build | `scripts/dev.sh bash -c 'cmake -S apps/telamon-launcher -B /work/cmake/dev -G Ninja && cmake --build /work/cmake/dev'` |
+| QML lint | `scripts/dev.sh qmllint-qt6 apps/telamon-launcher/qml/*.qml plasmoid/*/contents/ui/*.qml` |
+| Telamon checks | `scripts/dev.sh bash -c '$TELAMON_FRAMEWORK/tools/lint-app.sh . && $TELAMON_FRAMEWORK/tools/check-app-names.sh .'` |
 | RPM | `scripts/dev.sh packaging/build-rpm.sh /work/out` |
 
-`scripts/dev.sh` builds `localhost/atlas-launcher-dev:44` from
+`scripts/dev.sh` builds `localhost/telamon-launcher-dev:44` from
 `ci/Containerfile`'s `dev` target:
 - That file is the one list of packages.
 - CI runs in its `ci` target, published as
@@ -106,7 +106,7 @@ through `~/.claude/heavy/run.sh` with `-j 8` or less.
 ## Moving the atlas-framework pin
 
 Change `tag` in `Cargo.toml`, then
-`scripts/dev.sh cargo update -p atlas-framework-ui`. CI and the dev image
+`scripts/dev.sh cargo update -p telamon-framework-ui`. CI and the dev image
 follow the tag by themselves (`ci/framework-ref.sh`). When the app uses
-something new in Atlas.Ui, raise `ui:` in `apps/atlas-launcher/src/lib.rs`
-and `atlas-ui >=` in the spec (Requires and BuildRequires) to match.
+something new in Telamon.Ui, raise `ui:` in `apps/telamon-launcher/src/lib.rs`
+and `telamon-ui >=` in the spec (Requires and BuildRequires) to match.

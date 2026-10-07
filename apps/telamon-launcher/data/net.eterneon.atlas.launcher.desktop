@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+# The name before the rename to Telamon Launcher (0.3.0). Kept for this release
+# for what still launches it by this desktop ID (the apps move one by one); it
+# is hidden and starts the same program, which forwards to the running one.
+# The real entry is net.eterneon.telamon.launcher.desktop.
+Name=Telamon Launcher
+Comment=Start menu and search
+Exec=telamon-launcher
+Icon=atlasos
+Terminal=false
+NoDisplay=true
+X-KDE-StartupNotify=false
+OnlyShowIn=KDE;

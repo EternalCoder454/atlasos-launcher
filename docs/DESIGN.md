@@ -1,24 +1,24 @@
-# AtlasOS Launcher: design
+# Telamon Launcher: design
 
 What this file fixes: the form, the layout, the threading rule, what is
 trusted, who owns what, the failure modes and the budgets. Change it together
 with the code that changes them. The plan and roadmap are the Atlas Notes
 notes "AtlasOS/Launcher/Plan" and "AtlasOS/Launcher/Roadmap".
 
-App ID `net.eterneon.atlas.launcher`, repo `atlasos-launcher`, MIT.
+App ID `net.eterneon.telamon.launcher`, repo `atlasos-launcher`, MIT.
 
 ## Scope
 
-One launcher replaces two things on AtlasOS:
+One launcher replaces two things on Telamon OS:
 
 | Today | After |
 |---|---|
 | Andromeda Launcher (vendored plasmoid, the dock's first item, Meta) | Start mode of the launcher, opened by Meta or the dock button |
 | KRunner (Alt+Space; already retired by `build.sh`, its search lives in Andromeda) | Search mode of the launcher, opened by Alt+Space, Alt+F2 or Meta+S |
-| Baloo file search (indexer removed from AtlasOS) | AtlasOS Explorer's file index over D-Bus |
+| Baloo file search (indexer removed from Telamon OS) | Telamon Explorer's file index over D-Bus |
 
 **Start mode**, search first (Spotlight's flow, with the browsing Windows
-does best), in a blurred, rounded Atlas.Ui panel above the dock. The
+does best), in a blurred, rounded Telamon.Ui panel above the dock. The
 research behind it (2026-10-06): people launch by Meta, two or three letters
 and Enter; they hate ads and "Recommended" blocks, web results ahead of their
 own, a top hit that changes under Enter, and a launcher that loses its app
@@ -42,7 +42,7 @@ on results and sections they can hide. So, top to bottom:
    remembered in `state.conf`. In A–Z the letter headings open the letter
    grid (A–Z, then #; letters with no apps dimmed).
 
-Typing turns the page into **one ranked list**: apps, AtlasOS Settings pages
+Typing turns the page into **one ranked list**: apps, Telamon Settings pages
 and settings, files and folders, calculator and unit conversion, commands,
 web search, and the results of every enabled KRunner plugin. Each row shows
 its kind on the right ("App", "Setting", "Folder"...). The first row is the
@@ -74,7 +74,7 @@ when it is empty. Menu, Shift+F10 or a right click opens the context menu:
 | Copy Path | files, folders | clipboard |
 | Remove from Recent | recent files | `KRecentDocument::removeFile` |
 | App Settings | apps | Settings `ActivateAction("open-app", [id])` |
-| Uninstall | Flatpak apps only | `atlas-store --remove <X-Flatpak id>` through CommandLauncherJob with an activation token; other apps show it disabled with "Part of AtlasOS" |
+| Uninstall | Flatpak apps only | `telamon-store --remove <X-Flatpak id>` through CommandLauncherJob with an activation token; other apps show it disabled with "Part of Telamon OS" |
 | Move to Front, Left, Right | pinned | `pinned.list` |
 | Edit Applications… | panel menu | kmenuedit's desktop file through ApplicationLauncherJob |
 
@@ -90,7 +90,7 @@ Decided by how fast it opens. The two candidates:
    that first search is the 3–5 s freeze users report
    ([bug 352785](https://bugs.kde.org/show_bug.cgi?id=352785)). Meta takes two
    hops: KWin to plasmashell, then plasmashell to the applet.
-2. **A resident process** (KRunner's own form before AtlasOS retired it)
+2. **A resident process** (KRunner's own form before Telamon OS retired it)
    keeps its window created and its scene graph, glyphs and models warm while
    hidden. KWin's Meta binding calls its D-Bus method directly. Showing it
    maps a layer-shell surface and paints one frame: no QML to build, no
@@ -118,10 +118,10 @@ The P phase measures the claim against Andromeda on the same image, using
 the coordinator's KWin-script method (map time from the D-Bus call to
 `workspace.windowAdded`), cold and warm.
 
-**The dock button** is a QML-only plasmoid, `net.eterneon.atlas.launcher.button`,
+**The dock button** is a QML-only plasmoid, `net.eterneon.telamon.launcher.button`,
 with no C++ in the shell:
 
-- It shows the AtlasOS icon (with an accent underline while the launcher is
+- It shows the Telamon OS icon (with an accent underline while the launcher is
   open), and provides `org.kde.plasma.launchermenu`, so Plasma's own
   `activateLauncherMenu` reaches it.
 - A click calls `ToggleStart(a{sv})` with its screen and global rect, so the
@@ -150,9 +150,9 @@ panel's exclusive zone; a 12 px margin applies when the dock has none.
 
 ## Interfaces
 
-**D-Bus:** bus `net.eterneon.atlas.launcher`, path
-`/net/eterneon/atlas/launcher`, interface `net.eterneon.atlas.Launcher1`.
-It is D-Bus-activatable (`SystemdService=atlas-launcher.service`).
+**D-Bus:** bus `net.eterneon.telamon.launcher`, path
+`/net/eterneon/telamon/launcher`, interface `net.eterneon.telamon.Launcher1`.
+It is D-Bus-activatable (`SystemdService=telamon-launcher.service`).
 
 | Member | What it does |
 |---|---|
@@ -168,17 +168,21 @@ It is D-Bus-activatable (`SystemdService=atlas-launcher.service`).
 No method runs a result. Results run only from the user's own input in the
 panel.
 
-**CLI:** `atlas-launcher` starts the service (`--daemon`, used by the unit).
-`atlas-launcher --start`, `--search [text]` and `--hide` forward to the
+**CLI:** `telamon-launcher` starts the service (`--daemon`, used by the unit).
+`telamon-launcher --start`, `--search [text]` and `--hide` forward to the
 running instance through KDBusService.
 
+**The names before the rename (0.3.0)** answer for this release, because the
+dock button and the image move at their own pace (see "Names before the
+rename" at the end).
+
 **Global shortcuts:** registered at runtime with KGlobalAccel, under the
-component `net.eterneon.atlas.launcher`:
+component `net.eterneon.telamon.launcher`:
 
 - `toggle-search`: Alt+Space, with Alt+F2 as its alternate.
 - `toggle-search-meta-s`: Meta+S.
 
-The GlobalShortcuts portal (Atlas.Ui's AtlasGlobalShortcut) is not used: it
+The GlobalShortcuts portal (Telamon.Ui's TelamonGlobalShortcut) is not used: it
 asks the user to approve the binding, which a system launcher must not do.
 
 **Meta** is plasmashell's "Activate Application Launcher" global shortcut
@@ -194,11 +198,11 @@ KGlobalAccel binding) still opens Search.
 
 | File | What | Format |
 |---|---|---|
-| `$XDG_CONFIG_HOME/atlas-launcher/launcher.conf` | Options, written by Settings' "Launcher & Search" page with KConfig::Notify and followed live with KConfigWatcher | KConfig ini (below) |
-| `$XDG_CONFIG_HOME/atlas-launcher/pinned.list` | Pinned apps in order | One desktop file id per line (`org.kde.dolphin.desktop`), or `preferred://browser`, `preferred://filemanager`, `preferred://terminal`; `#` comments |
-| `/etc/xdg/atlas-launcher/pinned.list` | The image's default pins | Same |
-| `$XDG_CONFIG_HOME/atlas-launcher/state.conf` | The Start page's app view (`[Start] appView`: 0 by kind, 1 A–Z), written by the panel | KConfig-style ini (Qt's Settings) |
-| `$XDG_STATE_HOME/atlas-launcher/usage.tsv` | What the user ran, for ranking. Cleared by ClearHistory or by deleting it | `query-prefix TAB result-id TAB count TAB last-used-unix`, at most 2,000 lines |
+| `$XDG_CONFIG_HOME/telamon-launcher/launcher.conf` | Options, written by Settings' "Launcher & Search" page with KConfig::Notify and followed live with KConfigWatcher | KConfig ini (below) |
+| `$XDG_CONFIG_HOME/telamon-launcher/pinned.list` | Pinned apps in order | One desktop file id per line (`org.kde.dolphin.desktop`), or `preferred://browser`, `preferred://filemanager`, `preferred://terminal`; `#` comments |
+| `/etc/xdg/telamon-launcher/pinned.list` | The image's default pins | Same |
+| `$XDG_CONFIG_HOME/telamon-launcher/state.conf` | The Start page's app view (`[Start] appView`: 0 by kind, 1 A–Z), written by the panel | KConfig-style ini (Qt's Settings) |
+| `$XDG_STATE_HOME/telamon-launcher/usage.tsv` | What the user ran, for ranking. Cleared by ClearHistory or by deleting it | `query-prefix TAB result-id TAB count TAB last-used-unix`, at most 2,000 lines |
 
 `launcher.conf`:
 
@@ -232,18 +236,18 @@ and, failing that, the bare name. Every other runner runs only when its
 `<id>Enabled` key (or, unset, its metadata default) allows it.
 
 The Settings app, when its D-Bus call fails, starts as
-`net.eterneon.atlas.settings.desktop`.
+`net.eterneon.telamon.settings.desktop`.
 
 **Other apps' interfaces, used:**
 
-- AtlasOS Settings: `/usr/share/atlas-settings/search-index.json` (format
+- Telamon Settings: `/usr/share/telamon-settings/search-index.json` (format
   v1: locale maps, falling back to "C"; unknown fields ignored; another major
   `version` refused). Deep links through `ActivateAction("open", [link])`
-  and `("open-app", [id])` on `net.eterneon.atlas.settings`, with
+  and `("open-app", [id])` on `net.eterneon.telamon.settings`, with
   `activation-token` in platform_data. The user tile opens `users`.
-- Explorer: the file index, bus `net.eterneon.atlas.explorer.Search`, path
-  `/net/eterneon/atlas/explorer/Search`, interface
-  `net.eterneon.atlas.explorer.Search1` (D-Bus-activated `atlas-explorer-indexd`).
+- Explorer: the file index, bus `net.eterneon.telamon.explorer.Search`, path
+  `/net/eterneon/telamon/explorer/Search`, interface
+  `net.eterneon.telamon.explorer.Search1` (D-Bus-activated `atlas-explorer-indexd`).
   It offers `Search(s query, u limit, a{sv} options) -> a(sssssxtd)`, where
   each hit is (uri, name, kind, mime, icon, mtime, size, score), already
   sorted, and `Status() -> a{sv}`. The launcher asks for 20 hits, with
@@ -256,7 +260,7 @@ The Settings app, when its D-Bus call fails, starts as
   empty list (`Status` says "scanning") until its first scan is published.
   So a first query never waits on a scan, and an empty answer is not an
   error.
-- Store: `/usr/bin/atlas-store --remove <flatpak id>` with
+- Store: `/usr/bin/telamon-store --remove <flatpak id>` with
   `XDG_ACTIVATION_TOKEN` (agreed with the Store, its commit 7d91af9). The
   Store validates the id, opens the app's page with its Remove confirmation
   (never removing without it; Enter can't confirm it) and, if already open,
@@ -272,7 +276,7 @@ The Settings app, when its D-Bus call fails, starts as
 
 ## Layout
 
-- `crates/atlas-launcher-core`, no Qt:
+- `crates/telamon-launcher-core`, no Qt:
   - the app catalogue (plain data handed over from KService);
   - the query engine and scoring;
   - the calculator and unit converter;
@@ -281,7 +285,7 @@ The Settings app, when its D-Bus call fails, starts as
   - the usage store, the pins store and `PATH` command resolution;
   - web search URLs.
   It has unit tests and fixtures, and a bench of the query engine.
-- `apps/atlas-launcher`:
+- `apps/telamon-launcher`:
   - `cpp/main.cpp`: Qt start, KDBusService, the D-Bus adaptor.
   - `cpp/panel.*`: LayerShellQt, blur, placement, show and hide.
   - `cpp/runners.*`: RunnerManager to plain matches, and running a match.
@@ -290,7 +294,7 @@ The Settings app, when its D-Bus call fails, starts as
   - `src/` (CXX-Qt): the results and start-page models, and the bridge to
     the core.
   - `qml/`.
-- `plasmoid/net.eterneon.atlas.launcher.button/`: the dock button, QML only.
+- `plasmoid/net.eterneon.telamon.launcher.button/`: the dock button, QML only.
 - `packaging/`: the RPM spec and `build-rpm.sh`, the user unit, the D-Bus
   service file and the default `pinned.list`.
 
@@ -447,7 +451,7 @@ so stale ones are dropped.
 
 ## Lifetime and idle
 
-- **Start:** `atlas-launcher.service` (a user unit, `PartOf=graphical-session.target`)
+- **Start:** `telamon-launcher.service` (a user unit, `PartOf=graphical-session.target`)
   starts it at login.
 - **Activation:** the D-Bus service file activates the same unit, so Meta
   works even before the unit has started, and again after a crash.
@@ -621,29 +625,90 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 | Late results (KRunner, files) | painted ≤ 150 ms after the keystroke, p95 | Trace |
 | Idle CPU, hidden | 0 %: no wakeups over 60 s | `/proc/<pid>/status` context switches, `perf stat` |
 | RSS hidden, after first use | ≤ 110 MB (PSS ≤ 70 MB) | `smaps_rollup` |
-| Net idle memory for AtlasOS: (plasmashell without Andromeda + launcher) − (plasmashell with Andromeda), idle and after 20 opens | ≤ +40 MB; rarely used KRunner plugins load lazily if needed | Coordinator's VM run, `smaps_rollup` |
+| Net idle memory for Telamon OS: (plasmashell without Andromeda + launcher) − (plasmashell with Andromeda), idle and after 20 opens | ≤ +40 MB; rarely used KRunner plugins load lazily if needed | Coordinator's VM run, `smaps_rollup` |
 | RSS after 1,000 open/close cycles and 1,000 queries | ≤ +5 MB over the above | Same |
 | Startup at login to ready (hidden, warm) | ≤ 400 ms | Trace |
 | `usage.tsv` | ≤ 256 KiB | Line cap |
 | RPM | ≤ 10 MB | `rpm -qp --qf %{size}` |
 
 The memory budget is set against what the launcher removes: plasmashell's
-growth with Andromeda open, plus the KRunner daemon that AtlasOS already
+growth with Andromeda open, plus the KRunner daemon that Telamon OS already
 retired. The P phase reports the baseline from the coordinator's VM run.
 Software rendering (the Atlas default) is measured against the GPU; the
 cheaper of the two that meets the open budget wins.
 
-## Image changes (handed to the coordinator; the launcher never edits the AtlasOS repo)
+## Names before the rename (0.3.0)
 
-1. Install the `atlas-launcher` RPM:
-   - `/usr/bin/atlas-launcher`;
-   - the user unit `atlas-launcher.service`;
-   - `/usr/share/dbus-1/services/net.eterneon.atlas.launcher.service`;
-   - the plasmoid `/usr/share/plasma/plasmoids/net.eterneon.atlas.launcher.button/`;
-   - `/etc/xdg/atlas-launcher/pinned.list`;
-   - the desktop file `net.eterneon.atlas.launcher.desktop` (NoDisplay).
-2. `systemctl --global enable atlas-launcher.service` in `build.sh`.
-3. The dock layout: `net.eterneon.atlas.launcher.button` in place of
+The app was `atlas-launcher` (`net.eterneon.atlas.launcher`) until 0.3.0. For
+that release only, and to be removed once the image and every panel have
+moved, the old names keep working:
+
+- **D-Bus.** The process takes `net.eterneon.atlas.launcher` as well as
+  `net.eterneon.telamon.launcher`, and exports `net.eterneon.atlas.Launcher1`
+  (every method, the `Visible` property and its `PropertiesChanged`) at
+  `/net/eterneon/atlas/launcher`, as `LegacyLauncherAdaptor`, which forwards to
+  the same code as the new adaptor. A call to the old name starts the launcher
+  through `net.eterneon.atlas.launcher.service`. `org.freedesktop.Application`
+  is on the new name only: `atlas-launcher --start` is the same binary
+  (`/usr/bin/atlas-launcher`, a link) and reaches the running instance through
+  KDBusService as before.
+- **Unit.** `atlas-launcher.service` is a link to `telamon-launcher.service`,
+  so `systemctl --global enable atlas-launcher.service` and
+  `systemctl --user restart atlas-launcher` act on the new unit.
+- **Desktop file.** A hidden `net.eterneon.atlas.launcher.desktop` starts the
+  same program.
+- **The dock button.** The plasmoid is `net.eterneon.telamon.launcher.button`.
+  `plasma-updates/telamon-20261007-launcher-button.js` (installed by the
+  package in the shell's `contents/updates/`) replaces each button of the old
+  ID, in every panel, with one of the new ID at the same spot in the panel
+  (`AppletOrder`), with the keys of its `General` group (the plasmoid's own
+  schema) and its shortcut; it runs once per user. Checked against plasmashell
+  6.7 by `tests/plasma-update/run.sh` (a panel with the old ID, whose plasmoid
+  is not installed, between two other widgets). Groups the plasmoid's schema
+  does not know were not kept by plasmashell in that test. The old applet is not shipped: until the script runs a panel that
+  names it shows nothing for it, and the script runs when plasmashell next
+  starts.
+- **User files**, moved once on the first run (`legacy.rs`, one
+  `renameat2(RENAME_NOREPLACE)` each: atomic, never replacing; a new name that
+  exists wins and the old one is left): `$XDG_CONFIG_HOME/atlas-launcher/` to
+  `telamon-launcher/` (`launcher.conf`, `pinned.list`, `state.conf`),
+  `$XDG_STATE_HOME/atlas-launcher/` to `telamon-launcher/` (`usage.tsv`) and
+  `$XDG_STATE_HOME/atlas-launcherstaterc` to `telamon-launcherstaterc`. A
+  link to one of them (a dotfiles manager's) moves as the link, never
+  followed; none is copied. Settings must write `launcher.conf` in the new
+  folder.
+- **Other apps' desktop IDs.** `net.eterneon.atlas.<app>.desktop` is read as
+  `net.eterneon.telamon.<app>.desktop`: pins and history lines are kept under
+  the new ID (`pinned.list` and `usage.tsv` are rewritten at their next save),
+  and the catalog finds the app under either ID, so a pin follows an app that
+  has not moved yet.
+- **Other apps' interfaces, called.** Settings: `net.eterneon.telamon.settings`
+  first, then `net.eterneon.atlas.settings`, then the app itself
+  (`net.eterneon.telamon.settings.desktop`, then the old one); its index
+  `/usr/share/telamon-settings/search-index.json`, else
+  `/usr/share/atlas-settings/search-index.json`. Store: `telamon-store`, else
+  `atlas-store`. The image's default pins: `/etc/xdg/telamon-launcher/pinned.list`,
+  else `/etc/xdg/atlas-launcher/pinned.list`.
+- **Shortcuts.** KGlobalAccel stores a shortcut the user changed (Alt+Space,
+  Alt+F2, Meta+S) under the component name, which is now
+  `net.eterneon.telamon.launcher`. At the first start the launcher reads the
+  keys the old component `net.eterneon.atlas.launcher` holds for the same
+  actions, applies them to the new component when they differ from the
+  defaults and the new one has none yet, then asks the daemon to clean the old
+  component (`KGlobalAccel::cleanComponent`). Not run against a real
+  kglobalacceld here (no daemon in the headless run): best effort.
+
+## Image changes (handed to the coordinator; the launcher never edits the Telamon OS repo)
+
+1. Install the `telamon-launcher` RPM:
+   - `/usr/bin/telamon-launcher`;
+   - the user unit `telamon-launcher.service`;
+   - `/usr/share/dbus-1/services/net.eterneon.telamon.launcher.service`;
+   - the plasmoid `/usr/share/plasma/plasmoids/net.eterneon.telamon.launcher.button/`;
+   - `/etc/xdg/telamon-launcher/pinned.list`;
+   - the desktop file `net.eterneon.telamon.launcher.desktop` (NoDisplay).
+2. `systemctl --global enable telamon-launcher.service` in `build.sh`.
+3. The dock layout: `net.eterneon.telamon.launcher.button` in place of
    `AndromedaLauncher` as the dock's first item.
 4. Remove `system_files/usr/share/plasma/plasmoids/AndromedaLauncher/`, and
    `org.kde.plasma.simplekickoff/` if it is still there.
@@ -652,12 +717,14 @@ cheaper of the two that meets the open budget wins.
    group once planned for `/etc/xdg/kwinrc` is not read by KWin 6.7.
 6. Alt+Space, Alt+F2 and Meta+S: no image change. The launcher registers
    them with KGlobalAccel. KRunner's shortcuts file stays deleted.
-7. A Plasma update script, `atlasos-2026MMDD-launcher.js`. In every panel it
+7. A Plasma update script (`atlasos-2026MMDD-launcher.js`, in the image; the
+   package adds `telamon-20261007-launcher-button.js` to move the button to
+   the new ID). In every panel it
    replaces AndromedaLauncher (and kickoff, kicker, kickerdash or
    simplekickoff) with the button at the same position, and copies the old
    `favoriteApps` into the button's `ImportPins`.
-8. The default pins in `/etc/xdg/atlas-launcher/pinned.list`, taken from
-   Andromeda's `favoriteApps` default with the AtlasOS apps.
+8. The default pins in `/etc/xdg/telamon-launcher/pinned.list`, taken from
+   Andromeda's `favoriteApps` default with the Telamon OS apps.
 9. Keep the KRunner library and its plugins (already kept) and kmenuedit.
    Remove nothing else.
 

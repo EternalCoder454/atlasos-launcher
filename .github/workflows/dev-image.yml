@@ -22,7 +22,7 @@ on:
     paths:
       - ci/**
       - .containerignore
-      - packaging/atlas-launcher.spec
+      - packaging/telamon-launcher.spec
       - Cargo.toml
       - .github/workflows/dev-image.yml
   workflow_dispatch:
@@ -102,7 +102,7 @@ jobs:
           FRAMEWORK: ${{ needs.check.outputs.framework }}
         run: |
           podman build -f ci/Containerfile --target ci \
-            --build-arg "ATLAS_FRAMEWORK_REF=$FRAMEWORK" \
+            --build-arg "TELAMON_FRAMEWORK_REF=$FRAMEWORK" \
             --build-arg "IMAGE_TAG=$WANT" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             -t "$IMAGE:44" .
@@ -137,7 +137,7 @@ jobs:
           FRAMEWORK: ${{ needs.check.outputs.framework }}
         run: |
           podman build -f ci/Containerfile --target ci \
-            --build-arg "ATLAS_FRAMEWORK_REF=$FRAMEWORK" \
+            --build-arg "TELAMON_FRAMEWORK_REF=$FRAMEWORK" \
             --build-arg "IMAGE_TAG=$WANT" \
             -t "$IMAGE:44" .
           echo "::warning title=Dev image out of date::The published $IMAGE:44 does not match this change (ci/Containerfile, the spec's BuildRequires or the framework tag). It built here, but the jobs after it still run in the published one until the change reaches main."
