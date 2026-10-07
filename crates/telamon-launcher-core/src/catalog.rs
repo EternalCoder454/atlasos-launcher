@@ -17,6 +17,10 @@ const MAX_CATEGORIES: usize = 64;
 const MAX_ID_BYTES: usize = 255;
 /// Desktop actions score a little below the app itself.
 const ACTION_WEIGHT: f32 = 0.9;
+/// The app's own name, after the user renamed it, scores a little below the
+/// name they chose, so a search for the old name finds the app but never
+/// outranks an app that really has that name.
+const ORIGINAL_NAME_WEIGHT: f32 = 0.95;
 /// Shown for an app whose icon is missing or fails the icon check.
 const FALLBACK_ICON: &str = "application-x-executable";
 
@@ -31,7 +35,12 @@ pub struct AppActionEntry {
 pub struct AppEntry {
     /// `org.kde.dolphin.desktop`
     pub desktop_id: String,
+    /// What the launcher shows: the user's own name for the app when they set
+    /// one (`names::Names::apply`), else the app's.
     pub name: String,
+    /// The app's own name while `name` is the user's; empty otherwise.
+    /// Search matches it too.
+    pub original_name: String,
     pub generic_name: String,
     pub comment: String,
     pub keywords: Vec<String>,
@@ -86,6 +95,10 @@ fn sanitize(mut e: AppEntry) -> Option<AppEntry> {
         // Show something rather than hide an app that can still be launched.
         e.name = clean_display(e.desktop_id.trim_end_matches(".desktop"));
     }
+    e.original_name = clean_display(&e.original_name);
+    if e.original_name == e.name {
+        e.original_name.clear();
+    }
     e.generic_name = clean_display(&e.generic_name);
     e.comment = clean_display(&e.comment);
     // Icons are names or absolute paths: checked, never cleaned (cleaning
@@ -131,6 +144,8 @@ fn sanitize(mut e: AppEntry) -> Option<AppEntry> {
 /// What matching needs of one app, prepared once.
 struct Prep {
     name: Prepared,
+    /// The app's own name when the user renamed it (empty otherwise).
+    original: Prepared,
     /// Generic name, exec name, then the keywords.
     secondary: Vec<Prepared>,
     comment: Prepared,
@@ -275,6 +290,11 @@ pub fn app_item(app: &AppEntry, score: f32) -> ResultItem {
     }
 }
 
+/// The title of a desktop action's row: "Firefox › New Window".
+fn action_title(app: &AppEntry, act: &AppActionEntry) -> String {
+    format!("{} \u{203a} {}", app.name, act.name)
+}
+
 impl Catalog {
     pub fn new(entries: Vec<AppEntry>) -> Catalog {
         let total = entries.len();
@@ -304,6 +324,7 @@ impl Catalog {
                 secondary.extend(a.keywords.iter().map(|k| Prepared::new(k)));
                 Prep {
                     name: Prepared::new(&a.name),
+                    original: Prepared::new(&a.original_name),
                     secondary,
                     comment: Prepared::new(&a.comment),
                     actions: a.actions.iter().map(|x| Prepared::new(&x.name)).collect(),
@@ -330,6 +351,35 @@ impl Catalog {
             by_id,
             groups,
         }
+    }
+
+    /// Brings an app row's title up to date with the names in this catalogue
+    /// (the user renamed the app while its row was on screen). The row keeps
+    /// its place and its score; rows that are not an installed app's are left
+    /// alone. True when the title changed.
+    pub fn refresh_title(&self, item: &mut ResultItem) -> bool {
+        if item.kind != Kind::App {
+            return false;
+        }
+        let Some((desktop_id, action)) = item.id.strip_prefix("app:").map(|rest| {
+            rest.split_once('#')
+                .map_or((rest, None), |(d, a)| (d, Some(a)))
+        }) else {
+            return false;
+        };
+        let Some(app) = self.get(desktop_id) else {
+            return false;
+        };
+        let title = match action {
+            None => app.name.clone(),
+            Some(id) => match app.actions.iter().find(|a| a.id == id) {
+                Some(act) => action_title(app, act),
+                None => return false,
+            },
+        };
+        let changed = item.title != title;
+        item.title = title;
+        changed
     }
 
     pub fn len(&self) -> usize {
@@ -408,13 +458,20 @@ impl Catalog {
         });
         for (app, p) in self.apps.iter().zip(&self.prep) {
             let desc = (!app.comment.is_empty()).then_some(&p.comment);
-            if let Some(m) = score_fields(q, &p.name, &p.secondary, desc) {
+            let mut best = score_fields(q, &p.name, &p.secondary, desc);
+            if let Some(m) = p.original.matches(q) {
+                let m = m.quality() * ORIGINAL_NAME_WEIGHT;
+                best = Some(best.map_or(m, |b| b.max(m)));
+            }
+            if let Some(m) = best {
                 out.push(app_item(app, m * app_prior));
             }
             let Some((first, rest)) = &action_query else {
                 continue;
             };
-            if rest.is_empty() || !p.name.folded.starts_with(first) {
+            if rest.is_empty()
+                || !(p.name.folded.starts_with(first) || p.original.folded.starts_with(first))
+            {
                 continue;
             }
             for (act, ap) in app.actions.iter().zip(&p.actions) {
@@ -422,7 +479,7 @@ impl Catalog {
                     out.push(ResultItem {
                         id: format!("app:{}#{}", app.desktop_id, act.id),
                         kind: Kind::App,
-                        title: format!("{} \u{203a} {}", app.name, act.name),
+                        title: action_title(app, act),
                         subtitle: app.generic_name.clone(),
                         icon: if act.icon.is_empty() {
                             app.icon.clone()
@@ -498,6 +555,65 @@ mod tests {
             ],
             ..app("org.mozilla.firefox.desktop", "Firefox")
         }
+    }
+
+    fn renamed(id: &str, own: &str, shown: &str) -> AppEntry {
+        AppEntry {
+            original_name: own.into(),
+            ..app(id, shown)
+        }
+    }
+
+    #[test]
+    fn a_renamed_app_is_found_by_both_names_and_sorts_by_the_shown_one() {
+        let mut ff = renamed("firefox.desktop", "Firefox", "Zebra Browser");
+        ff.keywords = vec!["internet".into()];
+        ff.exec_name = "firefox-bin".into();
+        let c = Catalog::new(vec![app("a.desktop", "Apple"), ff, app("z.desktop", "Zoo")]);
+        // Sorted and grouped by the shown name.
+        let names: Vec<&str> = c.a_to_z().iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Apple", "Zebra Browser", "Zoo"]);
+        assert_eq!(c.letters(), ['A', 'Z']);
+        // The shown name finds it, as the title; so do the app's own name,
+        // a prefix of it, a typo, and its keywords.
+        for q in ["zebra", "Firefox", "fire", "firefx", "internet"] {
+            let r = search(&c, q);
+            assert_eq!(r[0].id, "app:firefox.desktop", "{q}");
+            assert_eq!(r[0].title, "Zebra Browser", "{q}");
+        }
+        // The app's own name ranks a little under the chosen one.
+        let own = search(&c, "firefox")[0].score;
+        let shown = search(&c, "zebra browser")[0].score;
+        assert!(own < shown, "{own} {shown}");
+        // And never above an app that really has that name.
+        let c = Catalog::new(vec![
+            renamed("x.desktop", "Notes", "Journal"),
+            app("n.desktop", "Notes"),
+        ]);
+        let r = search(&c, "notes");
+        assert_eq!(r[0].id, "app:n.desktop");
+        assert_eq!(r[1].id, "app:x.desktop");
+    }
+
+    #[test]
+    fn desktop_actions_follow_either_name() {
+        let mut ff = firefox();
+        ff.original_name = "Firefox".into();
+        ff.name = "Browser".into();
+        let c = Catalog::new(vec![ff]);
+        for q in ["browser private", "firefox private"] {
+            let r = search(&c, q);
+            let hit = r.iter().find(|r| r.id.ends_with("#new-private-window"));
+            let hit = hit.unwrap_or_else(|| panic!("{q}"));
+            // The row is titled with the name that is shown.
+            assert!(hit.title.starts_with("Browser"), "{}", hit.title);
+        }
+    }
+
+    #[test]
+    fn original_name_that_repeats_the_shown_one_is_dropped() {
+        let c = Catalog::new(vec![renamed("a.desktop", "Same", "Same")]);
+        assert_eq!(c.get("a.desktop").unwrap().original_name, "");
     }
 
     #[test]

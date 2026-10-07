@@ -173,6 +173,13 @@ FocusScope {
         onObjectAdded: Qt.callLater(page.rebuild)
         onObjectRemoved: Qt.callLater(page.rebuild)
     }
+    // A renamed app keeps its row but not its place: the titles and the
+    // order of the sections follow the model.
+    Connections {
+        target: page.apps
+        function onDataChanged() { Qt.callLater(page.rebuild) }
+        function onRowsMoved() { Qt.callLater(page.rebuild) }
+    }
     onAppViewChanged: rebuild()
 
     Settings {

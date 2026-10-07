@@ -23,7 +23,13 @@ ContextMenu {
     property string uri: ""
     property bool pinnable: false
     property bool pinned: false
+    property bool renamed: false
     property var appActions: []
+    // The item the menu opened for.
+    property var anchorItem: null
+
+    // "Rename App…" was chosen: the panel's editor opens over `item`.
+    signal renameRequested(string id, var item)
 
     readonly property bool isApp: desktopId.length > 0
     readonly property bool isFile: uri.length > 0
@@ -32,6 +38,7 @@ ContextMenu {
     function openFor(list, id, item, x, y, pinIndex, pinCount) {
         menu.list = list
         menu.rowId = id
+        menu.anchorItem = item
         menu.pinIndex = pinIndex === undefined ? -1 : pinIndex
         menu.pinCount = pinCount === undefined ? 0 : pinCount
         desktopId = backend.desktopIdOf(id)
@@ -39,6 +46,7 @@ ContextMenu {
         uri = backend.uriOf(id)
         pinnable = backend.canPin(id)
         pinned = backend.isPinned(id)
+        renamed = backend.hasCustomName(id)
         appActions = backend.actionsOf(id)
         if (!isApp && !isFile) {
             return
@@ -83,6 +91,20 @@ ContextMenu {
         visible: menu.list === 1 && menu.pinIndex >= 0 && menu.pinIndex < menu.pinCount - 1
         text: qsTr("Move Right")
         onTriggered: menu.backend.movePin(menu.rowId, menu.pinIndex + 1)
+    }
+
+    ContextMenuItem {
+        visible: menu.isApp
+        text: qsTr("Rename App…")
+        symbol: Symbols.DriveFileRenameOutline
+        // After the menu has closed, so the keyboard is not given back to it.
+        onTriggered: Qt.callLater(menu.renameRequested, menu.rowId, menu.anchorItem)
+    }
+    ContextMenuItem {
+        visible: menu.isApp && menu.renamed
+        text: qsTr("Reset Name")
+        symbol: Symbols.Undo
+        onTriggered: menu.backend.resetAppName(menu.rowId)
     }
 
     ContextMenuSeparator {

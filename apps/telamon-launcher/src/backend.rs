@@ -204,6 +204,30 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "uriOf"]
         fn uri_of(self: &Backend, id: &QString) -> QString;
+        /// Whether the app behind a row shows a name the user gave it (the
+        /// menu then offers Reset Name).
+        #[qinvokable]
+        #[cxx_name = "hasCustomName"]
+        fn has_custom_name(self: &Backend, id: &QString) -> bool;
+        /// The name the app behind a row shows now, or "".
+        #[qinvokable]
+        #[cxx_name = "nameOf"]
+        fn name_of(self: &Backend, id: &QString) -> QString;
+        /// The app's own name: what it is called without the user's name for
+        /// it (the same as `nameOf` when it has none), or "".
+        #[qinvokable]
+        #[cxx_name = "originalNameOf"]
+        fn original_name_of(self: &Backend, id: &QString) -> QString;
+        /// Shows the app behind a row under the name the user typed (cleaned
+        /// and capped here). An empty name, or the app's own, gives the
+        /// app's own name back.
+        #[qinvokable]
+        #[cxx_name = "renameApp"]
+        fn rename_app(self: Pin<&mut Backend>, id: &QString, name: &QString);
+        /// Gives the app behind a row its own name back.
+        #[qinvokable]
+        #[cxx_name = "resetAppName"]
+        fn reset_app_name(self: Pin<&mut Backend>, id: &QString);
         /// The Start page group of an app row (a key of
         /// `catalog::GROUPS`: "internet", "office"...), or "" for anything else.
         #[qinvokable]
@@ -290,6 +314,7 @@ use telamon_launcher_core::commands::SessionAvailability;
 use telamon_launcher_core::engine::{Engine, EngineConfig, Update};
 use telamon_launcher_core::late::{RunnerMatch, runner_items};
 use telamon_launcher_core::legacy;
+use telamon_launcher_core::names::{self, Names};
 use telamon_launcher_core::pins::valid_pin;
 use telamon_launcher_core::query::{MAX_LATE_BATCH, ModelOp, SearchOptions, Source, diff};
 use telamon_launcher_core::result::ResultItem;
@@ -458,6 +483,9 @@ pub struct BackendRust {
     /// The text of the latest query; the results list keeps its own.
     query: String,
     options: SearchOptions,
+    /// The user's names for apps (`names.conf`), as the IO worker last
+    /// reported them.
+    names: Names,
 }
 
 // Runs at exit only: the backend lives as long as the process.
@@ -476,6 +504,8 @@ const MAX_PREFERRED: usize = 64;
 /// UTF-16 units of typed text kept: four times the engine's cap, so a
 /// command row still sees the line is too long.
 const MAX_SEARCH_UNITS: isize = 4 * MAX_QUERY_CHARS as isize;
+/// UTF-16 units of a typed app name looked at: far past the longest name.
+const MAX_NAME_UNITS: isize = 4 * names::MAX_NAME_CHARS as isize;
 
 fn qstrings(list: &QStringList) -> Vec<String> {
     QList::<QString>::from(list)
@@ -532,6 +562,7 @@ fn app_entry(m: &VariantMap) -> AppEntry {
     AppEntry {
         desktop_id: text(m, "desktopId"),
         name: text(m, "name"),
+        original_name: String::new(),
         generic_name: text(m, "genericName"),
         comment: text(m, "comment"),
         keywords: texts(m, "keywords"),
@@ -644,6 +675,22 @@ impl qobject::Backend {
                 self.as_mut().rust_mut().state.set_pins(ids);
                 self.push(List::Pins);
             }
+            Update::Names(n) => {
+                let changed = self.as_mut().rust_mut().state.set_names(&n);
+                self.as_mut().rust_mut().names = n;
+                if !changed.is_empty() {
+                    for list in changed {
+                        self.push(list);
+                    }
+                    let letters = to_qstrings(&self.state.letters());
+                    self.as_mut().set_letters(letters);
+                    // The search worker's catalogue follows, so results,
+                    // recent apps and the best match carry the names too.
+                    if let Some(e) = &self.engine {
+                        e.set_apps(self.state.apps().to_vec());
+                    }
+                }
+            }
             Update::Recent { apps, files } => {
                 self.as_mut().rust_mut().state.set_recent(apps, files);
                 self.push(List::RecentApps);
@@ -680,7 +727,9 @@ impl qobject::Backend {
     pub fn set_apps(mut self: Pin<&mut Self>, apps: &QVariant, preferred: &QVariant) {
         let apps = apps.value::<QList<QVariant>>().unwrap_or_default();
         let preferred = preferred.value::<VariantMap>().unwrap_or_default();
-        let entries: Vec<AppEntry> = maps(&apps).take(MAX_APPS).map(|m| app_entry(&m)).collect();
+        let mut entries: Vec<AppEntry> =
+            maps(&apps).take(MAX_APPS).map(|m| app_entry(&m)).collect();
+        self.names.apply(&mut entries);
         let preferred: HashMap<String, String> = preferred
             .iter()
             .take(MAX_PREFERRED)
@@ -896,6 +945,57 @@ impl qobject::Backend {
         self.state
             .app_of(&id.to_string())
             .map_or_else(QString::default, |a| QString::from(a.desktop_id.as_str()))
+    }
+
+    pub fn has_custom_name(&self, id: &QString) -> bool {
+        self.state.has_custom_name(&id.to_string())
+    }
+
+    pub fn name_of(&self, id: &QString) -> QString {
+        self.state
+            .app_of(&id.to_string())
+            .map_or_else(QString::default, |a| QString::from(a.name.as_str()))
+    }
+
+    pub fn original_name_of(&self, id: &QString) -> QString {
+        self.state
+            .app_of(&id.to_string())
+            .map_or_else(QString::default, |a| {
+                let own = if a.original_name.is_empty() {
+                    &a.name
+                } else {
+                    &a.original_name
+                };
+                QString::from(own.as_str())
+            })
+    }
+
+    pub fn rename_app(self: Pin<&mut Self>, id: &QString, name: &QString) {
+        let Some(app) = self.state.app_of(&id.to_string()) else {
+            return;
+        };
+        let desktop_id = app.desktop_id.clone();
+        let own = if app.original_name.is_empty() {
+            &app.name
+        } else {
+            &app.original_name
+        };
+        // The editor caps what it takes; this guards the cleaning against a
+        // huge string from anywhere else.
+        let typed = name.left(MAX_NAME_UNITS).to_string();
+        let clean = names::clean_name(&typed);
+        let Some(e) = &self.engine else { return };
+        if clean.is_empty() || clean == *own {
+            e.reset_app_name(desktop_id);
+        } else {
+            e.rename_app(desktop_id, clean);
+        }
+    }
+
+    pub fn reset_app_name(self: Pin<&mut Self>, id: &QString) {
+        if let (Some(app), Some(e)) = (self.state.app_of(&id.to_string()), &self.engine) {
+            e.reset_app_name(app.desktop_id.clone());
+        }
     }
 
     pub fn category_of(&self, id: &QString) -> QString {
