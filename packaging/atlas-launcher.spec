@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           atlas-launcher
-Version:        0.2.1
+Version:        0.2.2
 Release:        1%{?dist}
 Summary:        AtlasOS Launcher, the Start menu and search of AtlasOS
 License:        MIT
@@ -109,6 +109,14 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.la
 %config(noreplace) %{_sysconfdir}/xdg/atlas-launcher/pinned.list
 
 %changelog
+* Tue Oct 06 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.2.2-1
+- Start slides up out of the dock instead of popping in at the middle.
+- The panel keeps one height while typing, and the first letter no longer
+  flashes "No results" before the answers arrive.
+- The search field uses Atlas's control shape; rows are never cut off
+  half-way at the edges, which fade instead.
+- Smoother wheel scrolling, for both notched and free-spinning wheels.
+
 * Tue Oct 06 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.2.1-1
 - Start opens centred on the screen, just above the dock, and the dock stays
   shown while it is open.
