@@ -15,6 +15,13 @@ FocusScope {
     property int columns: 6
     property real cell: 96
     property bool letterHeader: false
+    // The part of the Start page in view, from this section's top. Tiles
+    // more than two rows outside it draw nothing (LauncherAppTile `live`),
+    // so a long app list costs only the rows on screen.
+    property real viewTop: 0
+    property real viewHeight: Infinity
+    readonly property real firstLiveRow: Math.floor((viewTop - grid.y) / grid.cellHeight) - 2
+    readonly property real lastLiveRow: Math.floor((viewTop + viewHeight - grid.y) / grid.cellHeight) + 2
 
     signal activated(string id)
     signal menuRequested(string id, var item, real x, real y)
@@ -96,6 +103,10 @@ FocusScope {
                 index: cellItem.index
                 model: cellItem.modelData
                 reorderable: false
+                live: {
+                    const row = Math.floor(cellItem.index / section.columns)
+                    return row >= section.firstLiveRow && row <= section.lastLiveRow
+                }
                 current: cellItem.GridView.isCurrentItem && cellItem.GridView.view.activeFocus
                 focus: cellItem.GridView.isCurrentItem
                 onClicked: section.activated(rowId)

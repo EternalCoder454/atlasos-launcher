@@ -93,6 +93,10 @@ FocusScope {
             title: page.appView === 1 ? k : page.groupTitle(k),
             items: byKey[k]
         }))
+        // Place the new sections now, not at the next frame: each one's
+        // place decides which of its tiles draw (LauncherAppSection).
+        appsColumn.forceLayout()
+        column.forceLayout()
     }
 
     // A fresh page each time the panel opens.
@@ -349,6 +353,8 @@ FocusScope {
                         columns: page.columns
                         cell: page.cell
                         letterHeader: page.appView === 1
+                        viewTop: flick.contentY - appsColumn.y - section.y
+                        viewHeight: flick.height
                         onHeaderClicked: {
                             letters.active = true
                             const grid = letters.item as LauncherLetterGrid
