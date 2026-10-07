@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(telamon-launcher VERSION 0.3.0 LANGUAGES CXX)
+project(telamon-launcher VERSION 0.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -88,6 +88,7 @@ qt_add_qml_module(telamon-launcher-app
         qml/LauncherStartPage.qml
         qml/LauncherAppTile.qml
         qml/LauncherItemMenu.qml
+        qml/LauncherRenameEditor.qml
         qml/LauncherChip.qml
         qml/LauncherAppSection.qml
         qml/LauncherPowerButton.qml

@@ -107,6 +107,7 @@ Window {
         target: root.panel
         function onAboutToShow(mode, query) {
             itemMenu.close()
+            renamer.cancel()
             failure.visible = false
             failureTimer.stop()
             resultList.pendingEnter = false
@@ -124,6 +125,7 @@ Window {
         function onShownChanged() {
             if (!root.panel.shown) {
                 itemMenu.close()
+                renamer.cancel()
                 announce.stop()
                 failureTimer.stop()
                 // The next show starts at the top anyway: going there now
@@ -168,6 +170,32 @@ Window {
             parent: root.contentItem
             backend: root.backend
             actions: root.actions
+            onRenameRequested: (id, item) => renamer.openFor(id, item)
+        }
+    }
+
+    // The inline rename field (LauncherRenameEditor, a popup), made the first
+    // time "Rename App…" is chosen.
+    Loader {
+        id: renameLoader
+        active: false
+        sourceComponent: LauncherRenameEditor {
+            backend: root.backend
+        }
+    }
+
+    QtObject {
+        id: renamer
+        function openFor(id, item) {
+            renameLoader.active = true
+            const editor = renameLoader.item as LauncherRenameEditor
+            editor.openFor(id, item)
+        }
+        function cancel() {
+            const editor = renameLoader.item as LauncherRenameEditor
+            if (editor) {
+                editor.close()
+            }
         }
     }
 

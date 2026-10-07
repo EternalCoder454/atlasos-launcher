@@ -20,6 +20,11 @@ Item {
     // accessible name, and draws nothing (the app grid, LauncherAppSection).
     property bool live: true
     readonly property string rowId: model.id
+    // Where the name is (or would be, for a tile without a label): the top of
+    // the rename field laid over it (LauncherRenameEditor).
+    readonly property real nameTop: showLabel
+        ? (height - (iconSize + TelamonStyle.spacingSmall + Kirigami.Units.gridUnit * 1.3)) / 2 + iconSize + TelamonStyle.spacingSmall
+        : height / 2 + iconSize / 2 + TelamonStyle.spacingSmall
 
     signal clicked()
     signal menuRequested(real x, real y)
