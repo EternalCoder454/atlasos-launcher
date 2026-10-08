@@ -23,8 +23,10 @@ cd "$dir"
 # The panel's box on the screen: what is not black over the black backdrop.
 geo=$(convert "$prefix-black.png" -fuzz 1% -trim -format '%wx%h%X%Y' info:)
 echo "$geo" >"$prefix-geometry.txt"
-x0=$(sed 's/^[0-9]*x[0-9]*+\([0-9-]*\)+.*/\1/' <<<"$geo")
-y0=$(sed 's/^[0-9]*x[0-9]*+[0-9-]*+\([0-9-]*\)$/\1/' <<<"$geo")
+x0=$(convert "$prefix-black.png" -fuzz 1% -trim -format '%X' info:)
+y0=$(convert "$prefix-black.png" -fuzz 1% -trim -format '%Y' info:)
+x0=${x0#+}
+y0=${y0#+}
 size=$(identify -format '%wx%h' "$prefix-black.png")
 
 # The mask: the last blur request's rectangles (logical pixels of the panel's
