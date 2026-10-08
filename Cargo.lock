@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "telamon-launcher"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "cxx",
  "cxx-qt",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "telamon-launcher-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "libc",
  "log",
