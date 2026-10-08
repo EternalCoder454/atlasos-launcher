@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # The steps of headless-look.sh (sourced inside its session): $out, $scheme,
 # $scale, $face, $sw, $sh and the helpers (call, shot, move, setconf, backdrop,
 # lastblur, res, fail) are its.
