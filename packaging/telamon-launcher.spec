@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-launcher
-Version:        0.3.2
+Version:        0.3.3
 Release:        1%{?dist}
 Summary:        Telamon Launcher, the Start menu and search of Telamon OS
 License:        MIT
@@ -127,6 +127,11 @@ test "$(readlink %{buildroot}%{_userunitdir}/atlas-launcher.service)" = telamon-
 %config(noreplace) %{_sysconfdir}/xdg/telamon-launcher/pinned.list
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.3-1
+- Fix: icons drawn over dialogs, popups and menus. With Qt Quick's software renderer a Kirigami.Icon was
+  painted again over what sat in front of it whenever a repaint touched a part of it; the app's icons are
+  layers on that renderer now.
+
 * Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.2-1
 - The panel is see-through like the other Telamon apps: with Transparency on (Settings, Appearance) and the
   compositor blurring, it is the floating surface's translucent tint over the blurred desktop, with a blur
