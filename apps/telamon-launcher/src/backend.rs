@@ -315,6 +315,7 @@ use telamon_launcher_core::engine::{Engine, EngineConfig, Update};
 use telamon_launcher_core::late::{RunnerMatch, runner_items};
 use telamon_launcher_core::legacy;
 use telamon_launcher_core::names::{self, Names};
+use telamon_launcher_core::overrides;
 use telamon_launcher_core::pins::valid_pin;
 use telamon_launcher_core::query::{MAX_LATE_BATCH, ModelOp, SearchOptions, Source, diff};
 use telamon_launcher_core::result::ResultItem;
@@ -586,6 +587,32 @@ fn xdg_dir(var: &str, home: &Path, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| home.join(fallback))
 }
 
+/// Where the desktop's desktop files are: the user's folder (the only one
+/// written), then `$XDG_DATA_DIRS` (the spec's default when unset) and
+/// Flatpak's exports, as KService looks.
+fn app_dirs(home: &Path) -> overrides::AppDirs {
+    let data_home = xdg_dir("XDG_DATA_HOME", home, ".local/share");
+    let user = data_home.join("applications");
+    let dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_default();
+    let dirs = if dirs.is_empty() {
+        "/usr/local/share:/usr/share".to_owned()
+    } else {
+        dirs
+    };
+    let mut system: Vec<PathBuf> = Vec::new();
+    let extra = [
+        data_home.join("flatpak/exports/share"),
+        PathBuf::from("/var/lib/flatpak/exports/share"),
+    ];
+    for base in dirs.split(':').map(PathBuf::from).chain(extra) {
+        let dir = base.join("applications");
+        if base.is_absolute() && dir != user && !system.contains(&dir) {
+            system.push(dir);
+        }
+    }
+    overrides::AppDirs { user, system }
+}
+
 fn engine_config(can_hibernate: bool, can_switch_user: bool) -> EngineConfig {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -607,6 +634,7 @@ fn engine_config(can_hibernate: bool, can_switch_user: bool) -> EngineConfig {
             settings_index::LEGACY_PATH,
         ]),
         path_var: env("PATH").unwrap_or_default(),
+        apps: Some(app_dirs(&home)),
         locales: locale_chain(
             env("LANGUAGE").as_deref(),
             env("LC_ALL").as_deref(),
@@ -751,6 +779,9 @@ impl qobject::Backend {
         self.as_mut().set_letters(letters);
         if let Some(e) = &self.engine {
             e.set_apps(entries);
+            // An app that was updated has a new desktop file; the one made
+            // for its rename follows it.
+            e.sync_overrides();
         }
     }
 

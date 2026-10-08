@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-launcher
-Version:        0.3.1
+Version:        0.3.2
 Release:        1%{?dist}
 Summary:        Telamon Launcher, the Start menu and search of Telamon OS
 License:        MIT
@@ -127,6 +127,22 @@ test "$(readlink %{buildroot}%{_userunitdir}/atlas-launcher.service)" = telamon-
 %config(noreplace) %{_sysconfdir}/xdg/telamon-launcher/pinned.list
 
 %changelog
+* Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.2-1
+- The panel is see-through like the other Telamon apps: with Transparency on (Settings, Appearance) and the
+  compositor blurring, it is the floating surface's translucent tint over the blurred desktop, with a blur
+  region that follows its rounded corners (and the slide-in); with it off, or with no blur, it is opaque.
+  The switch and the compositor's blur are followed live. Before, a launcher started at login (before KWin's
+  blur was up) never noticed the blur and stayed opaque: it asks again at each show.
+- The page's soft top and bottom edges are only drawn on the opaque panel (over blur they showed as a denser
+  band); the letter grid stays opaque.
+- Rename App reaches the whole desktop: the name is also written to a desktop file of the same ID in
+  ~/.local/share/applications (the original with only Name changed, marked X-Telamon-Renamed=true, like the
+  menu editor does it), so the dock, the menus and KRunner show it too and a window still groups on its pinned
+  icon. Reset Name (or deleting the line in names.conf) removes the file again. Only files the launcher made
+  are ever changed or deleted; a file of your own with that ID is left alone and the name stays the launcher's
+  (with a notice). Names from 0.3.1 are written once at the first start, and an app's file is copied again
+  from the system's when the app updates (the name stays).
+
 * Wed Oct 07 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.1-1
 - New "Rename App…" in the right-click menu of an app (the grid, the pinned icons, the recent chips and the
   search results, the best match included). The name is edited in place: Enter saves, Escape cancels, an empty

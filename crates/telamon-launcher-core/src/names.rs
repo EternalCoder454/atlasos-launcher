@@ -1,7 +1,9 @@
 //! The user's own names for apps, `names.conf`: what the launcher shows
 //! instead of an app's name, in the grid, the pins, the recent chips and the
-//! search results. They are the launcher's alone: the desktop files are never
-//! copied or edited, so an app keeps following its own updates.
+//! search results. This file is the record of them; [`crate::overrides`]
+//! writes each one to a desktop file of the same id, so the dock and menus
+//! show it too (the system file is never edited, so an app keeps following
+//! its own updates).
 //!
 //! The file is a small ini, written by the launcher (and readable by hand):
 //!
@@ -119,9 +121,10 @@ impl Names {
     /// The file's content, with a header comment.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut s = String::from(
-            "# Telamon Launcher: your own names for apps, shown by the launcher only.\n\
-             # One desktop file id and its name per line. Delete a line to get the\n\
-             # app's own name back.\n",
+            "# Telamon Launcher: your own names for apps. The launcher also writes each one\n\
+             # to a desktop file of the same id in ~/.local/share/applications (marked\n\
+             # X-Telamon-Renamed) so the dock and menus show it. One desktop file id and\n\
+             # its name per line. Delete a line to get the app's own name back.\n",
         );
         s.push_str(GROUP);
         s.push('\n');
@@ -175,6 +178,11 @@ impl Names {
             .get(id)
             .or_else(|| desktop_id_alias(id).and_then(|a| self.map.get(&a)))
             .map(String::as_str)
+    }
+
+    /// Every id with its name, in id order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.map.iter().map(|(i, n)| (i.as_str(), n.as_str()))
     }
 
     pub fn len(&self) -> usize {

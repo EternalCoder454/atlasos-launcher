@@ -12,6 +12,7 @@ pub mod fsutil;
 pub mod late;
 pub mod legacy;
 pub mod names;
+pub mod overrides;
 pub mod pins;
 pub mod query;
 pub mod recent;

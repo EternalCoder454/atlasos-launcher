@@ -44,7 +44,8 @@ FocusScope {
     Rectangle {
         anchors.fill: parent
         radius: TelamonStyle.radiusLarge
-        color: TelamonStyle.floatingBackground
+        // Opaque: it covers the page, which must not show through.
+        color: TelamonStyle.surfaceRaised
     }
 
     Grid {

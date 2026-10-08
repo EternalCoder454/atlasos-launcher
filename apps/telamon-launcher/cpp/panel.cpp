@@ -5,12 +5,13 @@
 
 #include <QGuiApplication>
 #include <QLoggingCategory>
-#include <QPainterPath>
 #include <QQuickWindow>
 #include <QRegion>
 #include <QScreen>
+#include <QtMath>
 
 #include <algorithm>
+#include <cmath>
 
 #include <malloc.h>
 
@@ -25,6 +26,28 @@ constexpr int kEdgeMargin = 12;
 constexpr qreal kSearchTop = 0.22;
 // A hidden panel gives its memory back this long after the hide.
 constexpr int kTrimDelayMs = 60 * 1000;
+
+// The blur's region: the panel's rounded rectangle, moved down by `offset`
+// (the sheet still sliding in) and cut off at the window's edge. The rows of
+// each corner are rounded inwards, so the blur never reaches past the rounded
+// edge the panel draws (a pixel too little is better than a pixel too much).
+QRegion roundedRegion(const QSize &size, int radius, int offset)
+{
+    const int w = size.width();
+    const int h = size.height();
+    const int r = std::clamp(radius, 0, std::min(w, h) / 2);
+    offset = std::clamp(offset, 0, h);
+    QRegion region;
+    for (int y = 0; y < r; ++y) {
+        // The arc's distance from the side at the top of row y.
+        const qreal dy = r - y;
+        const int inset = int(std::ceil(r - std::sqrt(qreal(r) * r - dy * dy)));
+        region += QRect(inset, y + offset, w - 2 * inset, 1);
+        region += QRect(inset, h - 1 - y + offset, w - 2 * inset, 1);
+    }
+    region += QRect(0, r + offset, w, std::max(0, h - 2 * r));
+    return region & QRect(0, 0, w, h);
+}
 
 QSize sizeProperty(const QQuickWindow *window, const char *name, QSize fallback)
 {
@@ -90,6 +113,12 @@ Panel::Panel(QQuickWindow *window, QObject *parent)
             m_trim.stop();
         } else {
             m_trim.start();
+        }
+    });
+    connect(window, &QQuickWindow::frameSwapped, this, [this] {
+        if (m_awaitFrame) {
+            m_awaitFrame = false;
+            qCDebug(lcPanel) << "first frame" << m_showTimer.nsecsElapsed() / 1000 << "us after the start of the show, exposed" << m_window->isExposed();
         }
     });
     connect(window, &QWindow::widthChanged, this, &Panel::updateBlur);
@@ -236,27 +265,40 @@ void Panel::map(const QString &query)
     if (!m_window) {
         return;
     }
+    m_showTimer.start();
+    m_awaitFrame = true;
     qCDebug(lcPanel) << "show" << m_mode << m_window->size();
     Q_EMIT aboutToShow(m_mode, query);
     m_mappedAt.start();
     m_window->show();
     m_window->requestActivate();
+    // A new mapping starts with no blur of its own.
+    updateBlur(true);
+}
+
+void Panel::refreshBlur()
+{
     updateBlur();
 }
 
-void Panel::updateBlur()
+void Panel::updateBlur(bool force)
 {
     if (!m_window || !m_window->isVisible()) {
         return;
     }
     // The transparency switch (Telamon.Ui) turns blur off with the translucency.
     const bool blur = m_window->property("blurEnabled").toBool();
-    if (!blur) {
-        KWindowEffects::enableBlurBehind(m_window, false);
+    QRegion region;
+    if (blur) {
+        region = roundedRegion(m_window->size(),
+                               qCeil(m_window->property("cornerRadius").toReal()),
+                               qCeil(m_window->property("blurOffset").toReal()));
+    }
+    if (!force && m_blurApplied && blur == m_blurOn && region == m_blurRegion) {
         return;
     }
-    const qreal radius = m_window->property("cornerRadius").toReal();
-    QPainterPath path;
-    path.addRoundedRect(QRectF(QPointF(0, 0), QSizeF(m_window->size())), radius, radius);
-    KWindowEffects::enableBlurBehind(m_window, true, QRegion(path.toFillPolygon().toPolygon()));
+    m_blurApplied = true;
+    m_blurOn = blur;
+    m_blurRegion = region;
+    KWindowEffects::enableBlurBehind(m_window, blur, region);
 }
