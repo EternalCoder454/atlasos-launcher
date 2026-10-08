@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2154  # variables and helpers come from headless-look.sh, which sources this
 # Steps of headless-look.sh (LOOK_STEPS=headless-look-latency.sh): the time
 # from the start of a show to the first frame handed to KWin, 25 shows, each
 # after a hide (the panel's own "first frame" debug line, in app.log).
