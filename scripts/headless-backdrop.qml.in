@@ -1,0 +1,41 @@
+import QtQuick
+import QtQuick.Window
+
+// A stand-in desktop for headless runs (scripts/headless-look.sh): the script
+// fills in KIND (pattern, black or white) and starts it behind the panel.
+Window {
+    id: win
+    width: 1920
+    height: 1080
+    visible: true
+    flags: Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus
+    readonly property string kind: "@KIND@"
+    color: kind === "black" ? "black" : (kind === "white" ? "white" : "#2a2f45")
+    Item {
+        anchors.fill: parent
+        visible: win.kind === "pattern"
+        Repeater {
+            model: 48
+            Rectangle {
+                required property int index
+                x: index * 40
+                width: 20
+                height: parent.height
+                color: Qt.hsla((index * 0.0625) % 1.0, 0.85, 0.5, 1)
+            }
+        }
+        Repeater {
+            model: 27
+            Rectangle {
+                required property int index
+                y: index * 40 + 20
+                width: parent.width
+                height: 10
+                color: index % 2 ? "white" : "black"
+            }
+        }
+        Rectangle { x: 700; y: 100; width: 300; height: 300; radius: 150; color: "#ffffff" }
+        Rectangle { x: 1000; y: 100; width: 300; height: 300; radius: 150; color: "#000000" }
+        Text { x: 120; y: 40; text: "BACKDROP"; font.pixelSize: 160; font.bold: true; color: "#ffee00" }
+    }
+}

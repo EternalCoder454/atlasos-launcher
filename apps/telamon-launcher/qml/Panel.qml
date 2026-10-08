@@ -32,8 +32,17 @@ Window {
     readonly property size startSize: Qt.size(Kirigami.Units.gridUnit * 36, Kirigami.Units.gridUnit * 36)
     readonly property size searchSize: Qt.size(Kirigami.Units.gridUnit * 38, Kirigami.Units.gridUnit * 26)
     readonly property real cornerRadius: TelamonStyle.radiusLarge * 2
-    // The transparency switch: no blur and an opaque panel when it is off.
+    // The transparency switch (Settings, Appearance) with the compositor's
+    // blur, as the other Telamon apps follow it: on, the panel is the
+    // floating surface's translucent tint (TelamonStyle.floatingBackground,
+    // as Telamon.Ui's menus and popovers have it) over what KWin blurs
+    // behind it; off, or with no blur to be had, it is opaque. Panel (C++)
+    // reads `blurEnabled`, `cornerRadius` and `blurOffset` to set the blur's
+    // region.
     readonly property bool blurEnabled: Appearance.effective
+    // How far the sheet is still below its place while it slides in; the
+    // blur follows it, so nothing is blurred above the sheet.
+    readonly property real blurOffset: slide.y
 
     // The panel keeps its size while typing: a panel that grew and shrank
     // with each keystroke's results looked like it was flickering.
@@ -81,6 +90,9 @@ Window {
         case "NamesWriteFailed":
             failure.text = qsTr("Could not save that name.")
             break
+        case "NameNotShared":
+            failure.text = qsTr("Renamed here only: the dock and menus keep the app's own name.")
+            break
         case "SessionCall":
             failure.text = qsTr("The session did not respond.")
             break
@@ -107,9 +119,18 @@ Window {
     color: "transparent"
     flags: Qt.FramelessWindowHint
 
+    // Blur on or off, live: the Transparency switch changed, or the
+    // compositor's blur effect did (found out at the next show).
+    onBlurEnabledChanged: if (panel) panel.refreshBlur()
+    onBlurOffsetChanged: if (panel && blurEnabled) panel.refreshBlur()
+
     Connections {
         target: root.panel
         function onAboutToShow(mode, query) {
+            // Nothing tells us when KWin's blur effect is switched on or
+            // off, and this process outlives it: ask again at each show,
+            // before the first frame, so that frame has the right tint.
+            Appearance.refresh()
             itemMenu.close()
             renamer.cancel()
             failure.visible = false

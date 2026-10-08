@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QRect>
+#include <QRegion>
 #include <QString>
 #include <QElapsedTimer>
 #include <QTimer>
@@ -47,6 +48,10 @@ public:
     void toggleStart(const DockAnchor &anchor = {});
     void toggleSearch();
     Q_INVOKABLE void hide();
+    // Sets the blur behind the window again: it follows the window's
+    // `blurEnabled`, `cornerRadius` and `blurOffset` (qml/Panel.qml). A no-op
+    // while the window is hidden; each show sets it.
+    Q_INVOKABLE void refreshBlur();
 
 Q_SIGNALS:
     void modeChanged();
@@ -58,7 +63,7 @@ Q_SIGNALS:
 private:
     void place(const QString &mode, const DockAnchor &anchor);
     void map(const QString &query);
-    void updateBlur();
+    void updateBlur(bool force = false);
     QScreen *screenNamed(const QString &name) const;
 
     QPointer<QQuickWindow> m_window;
@@ -70,5 +75,13 @@ private:
     // When the window was last mapped; a focus loss within kFocusGraceMs
     // of it is the old mapping's (see the constructor).
     QElapsedTimer m_mappedAt;
+    // The time from the start of a show to its first frame handed to the
+    // compositor, logged once per show (category debug).
+    QElapsedTimer m_showTimer;
+    bool m_awaitFrame = false;
+    // What was last asked of the compositor, so a repeat is not sent again.
+    bool m_blurApplied = false;
+    bool m_blurOn = false;
+    QRegion m_blurRegion;
     static constexpr qint64 kFocusGraceMs = 500;
 };

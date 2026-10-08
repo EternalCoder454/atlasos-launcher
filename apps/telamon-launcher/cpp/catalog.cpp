@@ -56,7 +56,13 @@ QVariantMap appMap(const KService &service)
     }
     QVariantMap map;
     map.insert(QStringLiteral("desktopId"), service.storageId());
-    map.insert(QStringLiteral("name"), service.name());
+    // A desktop file the launcher wrote for a rename (Rename App, so the dock
+    // and menus show the name too) says what the app's own name was: the
+    // catalogue keeps that as the app's, and names.conf puts the user's on
+    // top, as before.
+    const bool renamed = service.property<QString>(QStringLiteral("X-Telamon-Renamed")) == QLatin1String("true");
+    const QString original = renamed ? service.property<QString>(QStringLiteral("X-Telamon-Original-Name")) : QString();
+    map.insert(QStringLiteral("name"), original.isEmpty() ? service.name() : original);
     map.insert(QStringLiteral("genericName"), service.genericName());
     map.insert(QStringLiteral("comment"), service.comment());
     map.insert(QStringLiteral("icon"), service.icon());

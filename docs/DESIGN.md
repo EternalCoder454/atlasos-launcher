@@ -108,6 +108,22 @@ login, hidden and painted once while hidden; Start and Search modes change
 its anchors, margins and size before it is shown. KWin blurs it through
 `KWindowEffects::enableBlurBehind`, with a rounded region.
 
+**See-through like the other Telamon apps (0.3.2).** The panel follows
+Telamon.Ui's `Appearance.effective` (the Transparency switch and the
+compositor's blur): on, its background is `TelamonStyle.floatingBackground`
+(translucent, as Telamon.Ui's menus and popovers have it) over KWin's blur;
+off, or with no blur, it is opaque and no blur is asked. Because the process
+outlives KWin's blur effect (it starts at login), it calls
+`Appearance.refresh()` at each show, before the first frame. The blur region
+is the panel's rounded rectangle (`Panel::updateBlur`: the corner rows
+rounded inwards so no blur leaks past the corners, moved down with the
+sheet while it slides in), set at each show and again when the switch or the
+size changes, while shown. The page's soft edges are drawn on the opaque
+panel only (over blur they would show as a denser band), and the letter grid,
+which covers the page, is opaque. Debug logging says "first frame" with the
+microseconds from the start of a show to the first frame handed to KWin
+(category `telamon.launcher.panel`).
+
 Other reasons for the choice:
 
 - **Crash isolation.** KRunner plugins (including third-party ones) and our
@@ -433,11 +449,62 @@ field is one popup of the panel (`LauncherRenameEditor.qml`, drawn in the
 overlay like the menu), not part of the tiles and rows, because a rename
 changes the lists and remakes them.
 
-**The name is the launcher's own.** It lives in `names.conf` (above), keyed by
-the app's desktop file ID, and nowhere else: the desktop file is never copied
-or edited, so the app keeps following its own updates, and deleting the file
-(or a line) gives the app's name back. The other apps, the dock and Plasma's
-menus show the app's own name as before.
+**`names.conf` is the record; the desktop gets a copy (0.3.2).** The name
+lives in `names.conf` (above), keyed by the app's desktop file ID. So that the
+dock, Plasma's menus, KRunner and Settings show it too, the IO worker also
+writes a **user override**: a desktop file of the same ID in
+`$XDG_DATA_HOME/applications` (the way KDE's menu editor changes an entry;
+`overrides.rs`). It is the system file's content with only `Name` changed (the
+localized `Name[..]` lines are dropped, so the name is the same in every
+language) and two keys that say the launcher made it:
+
+```text
+X-Telamon-Renamed=true
+X-Telamon-Original-Name=<the system file's Name>
+```
+
+The ID is the app's real desktop file ID, so a pin in the dock
+(`applications:<id>`), the window's app id and the launch
+(`KService::serviceByStorageId`, then `KIO::ApplicationLauncherJob`, the same
+call for every app) all still find the one app: a window groups on its pinned
+icon, renamed or not (`scripts/headless-dock.sh` checks it in a headless
+Plasma). The catalogue (`catalog.cpp`) reads the marker and reports
+`X-Telamon-Original-Name` as the app's own name, and `names.conf` puts the
+user's on top as before, so "Reset Name" and searching by either name work
+from the file too.
+
+- **Only files the launcher made are changed or deleted.** A file at that path
+  without the marker (the user's own, or another tool's), or a link, is left
+  alone and the name stays the launcher's alone; the panel says so ("Renamed
+  here only…", `NameNotShared`). Nothing is written outside the user's
+  `applications` folder, a link there is never followed, writes are atomic
+  (mode 0644), the ID is validated as a desktop file ID, and a desktop file
+  read is at most 256 KiB of UTF-8 text with `Type=Application`.
+- **The original** is the first system file of the ID in `$XDG_DATA_DIRS`
+  (and Flatpak's exports), the same one the desktop would use, also as
+  `kde/foo.desktop` for `kde-foo.desktop`. A Flatpak export is copied as it
+  is (`Exec`, `X-Flatpak` and the rest). An app that exists only in the user's
+  own folder has no original: the name stays the launcher's alone. When the
+  first file cannot be used (too large, not text, not an application) there is
+  no original either, and a lower folder's file is not put in its place.
+- **Updates.** At start, and whenever the catalogue changes, `overrides::sync`
+  makes the files agree with `names.conf`: one is (re)written when it is
+  missing or the system file changed (the name stays), one the launcher made
+  that `names.conf` no longer asks for, or whose app is gone, is deleted. This
+  is also how names set before 0.3.2 reach the desktop, once. The file gets
+  the system file's modification time, so "recently installed" does not list
+  a renamed app.
+- **Reset Name**, or deleting the line in `names.conf`, removes the file.
+  An app that moved from the Atlas to the Telamon id loses the file of the
+  id it left. Nothing is removed because a file is missing when no system
+  folder can be read, nor while `names.conf` is unreadable.
+- **Limits.** The app's own localized name is not kept in the file (the
+  launcher's "own name" is the unlocalized `Name`); an edit made to the file
+  by another tool (the menu editor) is overwritten at the next sync, as the
+  marker says whose file it is; folders deeper than one level in a menu id
+  (`kde-sub-foo.desktop`) have no original.
+- KSycoca notices the new file by itself (the dock and the launcher update
+  without a restart); nothing here runs `kbuildsycoca6`.
 
 **Where it shows.** Everywhere the launcher shows the app: the grid (grouped
 and A–Z, sorted by the name shown, so a renamed app moves to its new letter),
@@ -605,7 +672,9 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   group `[Names]` only; ids must be valid desktop file IDs; each name goes
   through `names::clean_name` (invisible and bidi characters removed, at most
   64 characters, nothing left means no name); at most 400 names and 256 KiB.
-  They are never logged.
+  They are never logged. The desktop file made for a rename (see "App
+  names") is written only under `$XDG_DATA_HOME/applications`, atomically,
+  and only over a file that carries the launcher's marker.
 - **Displayed text:** every `Text`/`Label` that shows app, file, plugin or
   query text sets `textFormat: Text.PlainText`.
 - **Typed commands:**
@@ -653,7 +722,8 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 | A worker thread cannot start | The engine does nothing; one `ThreadStart` problem is reported and logged |
 | A recent file is on a hung network mount | Only the scan worker waits on its `stat` (the GUI, search and writes never do); recent files show the last list until it returns. At logout, shutdown stops waiting after 2 s |
 | A pinned app is uninstalled | Hidden, but kept in `pinned.list`, so a reinstall brings it back |
-| A renamed app is uninstalled | Its name is ignored but kept in `names.conf`, so a reinstall brings it back |
+| A renamed app is uninstalled | Its name is ignored but kept in `names.conf`, so a reinstall brings it back; the desktop file the launcher made for it is deleted at the next sync |
+| A rename cannot reach the desktop (a desktop file of the user's own with that ID, no system file to copy, a write failure) | The name stays the launcher's; "Renamed here only: the dock and menus keep the app's own name." |
 | A launch fails | A notification with the job's error |
 | A power or session call fails | An inline message at the bottom of the panel |
 | No layer-shell (not KWin, or X11) | A frameless always-on-top window, centred; logged |

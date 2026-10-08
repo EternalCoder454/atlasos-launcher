@@ -32,6 +32,7 @@ use crate::catalog::{self, AppEntry, Catalog};
 use crate::commands::{PathCache, SessionAvailability, SessionCommands};
 use crate::fsutil::{read_capped, sweep_stale_temps, write_atomic};
 use crate::names::{self, Names};
+use crate::overrides;
 use crate::pins::{self, Pins};
 use crate::query::{self, Context, ResultSet, SearchOptions, Source, Sources};
 use crate::recent::{RecentError, RecentFiles};
@@ -78,6 +79,9 @@ pub struct EngineConfig {
     /// Telamon Settings' `search-index.json`.
     pub settings_index: PathBuf,
     pub path_var: String,
+    /// Where desktop files are, so a name the user gives an app reaches the
+    /// dock and menus too ([`overrides`]); `None` keeps names to the launcher.
+    pub apps: Option<overrides::AppDirs>,
     /// The locale chain from [`crate::settings_index::locale_chain`].
     pub locales: Vec<String>,
     pub session: SessionAvailability,
@@ -107,6 +111,10 @@ pub enum ProblemKind {
     /// A new app name was refused (not a valid app, nothing left of the name
     /// after cleaning, or the list is full).
     NameRefused,
+    /// An app's new name is the launcher's alone: the dock and menus keep the
+    /// app's own (a desktop file of the user's own is in the way, there is no
+    /// system desktop file to copy, or the file could not be written).
+    NameNotShared,
     /// An import of Andromeda's favourites was ignored (the user already has
     /// a list, or nothing in it was valid).
     ImportSkipped,
@@ -252,6 +260,7 @@ enum IoMsg {
     RenameApp(String, String),
     /// Give the app its own name back.
     ResetAppName(String),
+    SyncOverrides,
     WriteUsage(Vec<u8>),
     ClearUsage,
     Shutdown,
@@ -462,6 +471,12 @@ impl Engine {
     /// it had a custom one.
     pub fn reset_app_name(&self, id: String) {
         self.to_io(IoMsg::ResetAppName(id));
+    }
+
+    /// The catalogue changed (an app was installed, updated or removed):
+    /// the desktop files made for renames follow the apps' own again.
+    pub fn sync_overrides(&self) {
+        self.to_io(IoMsg::SyncOverrides);
     }
 
     /// Andromeda's favourites, taken over only while the user has no
@@ -901,9 +916,13 @@ struct Io {
     search: Sender<SearchMsg>,
     pins: Pins,
     names: Names,
+    /// False when `names.conf` could not be read: nothing is then known about
+    /// what the user chose, so no desktop file made for a name is removed.
+    names_readable: bool,
     /// Whether the user has a `pinned.list` (or one that could not be read,
     /// which must not be replaced by an import).
     user_pins: bool,
+    apps: Option<overrides::AppDirs>,
     #[cfg(test)]
     load_gate: Option<Receiver<()>>,
     #[cfg(test)]
@@ -924,7 +943,9 @@ impl Io {
             search,
             pins: Pins::default(),
             names: Names::default(),
+            names_readable: true,
             user_pins: false,
+            apps: cfg.apps.clone(),
             #[cfg(test)]
             load_gate: hooks.load_gate.take(),
             #[cfg(test)]
@@ -979,9 +1000,11 @@ impl Io {
             IoMsg::MovePin(id, i) => self.change_pins(|p| p.move_to(&id, i)),
             IoMsg::ImportPins(list) => self.import_pins(&list),
             IoMsg::RenameApp(id, name) => self.rename_app(&id, &name),
+            IoMsg::SyncOverrides => self.sync_overrides(),
             IoMsg::ResetAppName(id) => {
                 if self.names.reset(&id) {
                     self.save_names();
+                    self.unshare_name(&id);
                 }
             }
             IoMsg::WriteUsage(bytes) => {
@@ -1043,6 +1066,7 @@ impl Io {
         self.out.send(Update::Pins(self.pins.ids().to_vec()));
         self.guarded(Io::load_names);
         self.out.send(Update::Names(self.names.clone()));
+        self.guarded(Io::sync_overrides);
     }
 
     /// Like `guarded`, but returns the result (None after a panic).
@@ -1122,7 +1146,50 @@ impl Io {
             Ok(None) => {}
             Err(e) => {
                 log::warn!("names not read: {}", io_kind(&e));
+                self.names_readable = false;
                 self.out.problem(ProblemKind::NamesUnreadable);
+            }
+        }
+    }
+
+    /// Makes the desktop files agree with the names (once at start: names
+    /// set before they reached the desktop, and apps that were updated since).
+    fn sync_overrides(&mut self) {
+        let Some(dirs) = self.apps.as_ref().filter(|_| self.names_readable) else {
+            return;
+        };
+        let r = overrides::sync(dirs, &self.names);
+        if r.changed() || r.failed > 0 {
+            log::info!(
+                "app names in desktop files: {} written, {} removed, {} not shared, {} failed",
+                r.written,
+                r.removed,
+                r.not_shared,
+                r.failed
+            );
+        }
+    }
+
+    /// Puts app `id`'s name in a desktop file of the same id, for the dock
+    /// and menus.
+    fn share_name(&mut self, id: &str) {
+        let (Some(dirs), Some(name)) = (&self.apps, self.names.get(id)) else {
+            return;
+        };
+        let ids = overrides::ids_of(id);
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        match overrides::apply(dirs, &refs, name) {
+            overrides::Outcome::Written | overrides::Outcome::Unchanged => {}
+            _ => self.out.problem(ProblemKind::NameNotShared),
+        }
+    }
+
+    /// Takes the file the launcher made for `id` away, if it made one.
+    fn unshare_name(&mut self, id: &str) {
+        let Some(dirs) = &self.apps else { return };
+        for each in overrides::ids_of(id) {
+            if overrides::remove(dirs, &each) == overrides::Outcome::Failed {
+                self.out.problem(ProblemKind::NameNotShared);
             }
         }
     }
@@ -1130,6 +1197,7 @@ impl Io {
     fn rename_app(&mut self, id: &str, name: &str) {
         if self.names.set(id, name) {
             self.save_names();
+            self.share_name(id);
         } else if self.names.get(id) != Some(names::clean_name(name).as_str()) {
             // Not "already that name": the name was refused.
             self.out.problem(ProblemKind::NameRefused);
@@ -1375,6 +1443,7 @@ mod tests {
             xbel: p.join("recently-used.xbel"),
             settings_index: p.join("search-index.json"),
             path_var: String::new(),
+            apps: None,
             locales: vec!["en".into()],
             session: SessionAvailability::default(),
         };
@@ -1808,6 +1877,128 @@ mod tests {
         let (e, rx) = start(&f);
         assert_eq!(names_update(&rx).get("a.desktop"), Some("My App"));
         stop(e);
+    }
+
+    const DESKTOP: &str =
+        "[Desktop Entry]\nType=Application\nName=Files\nName[de]=Dateien\nExec=files\n";
+
+    /// A fixture with a system folder (one app in it) and the user's.
+    fn with_apps(f: &mut Fixture) -> overrides::AppDirs {
+        let sys = f.dir.path().join("usr/applications");
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::write(sys.join("a.desktop"), DESKTOP).unwrap();
+        let dirs = overrides::AppDirs {
+            user: f.dir.path().join("home/applications"),
+            system: vec![sys],
+        };
+        f.cfg.apps = Some(dirs.clone());
+        dirs
+    }
+
+    #[test]
+    fn a_rename_reaches_the_desktop_file_and_a_reset_takes_it_back() {
+        let mut f = fixture();
+        let dirs = with_apps(&mut f);
+        let file = dirs.user.join("a.desktop");
+        let (e, rx) = start(&f);
+        names_update(&rx);
+        e.rename_app("a.desktop".into(), "My Files".into());
+        names_update(&rx);
+        // The override is written before the next message is handled.
+        e.reset_app_name("nothing.desktop".into());
+        e.rename_app("a.desktop".into(), "Other".into());
+        names_update(&rx);
+        stop(e);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\nName=Other\n") && !text.contains("Dateien"));
+        assert!(overrides::is_ours(text.as_bytes()));
+        // The next start finds it as it should be, and a reset removes it.
+        let (e, rx) = start(&f);
+        names_update(&rx);
+        e.reset_app_name("a.desktop".into());
+        names_update(&rx);
+        stop(e);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn start_migrates_names_and_drops_what_names_conf_no_longer_asks_for() {
+        let mut f = fixture();
+        let dirs = with_apps(&mut f);
+        std::fs::create_dir_all(&f.cfg.config_dir).unwrap();
+        std::fs::write(
+            f.cfg.config_dir.join(NAMES_FILE),
+            "[Names]\na.desktop=Mine\n",
+        )
+        .unwrap();
+        // A leftover of ours for an app that has no name any more.
+        std::fs::create_dir_all(&dirs.user).unwrap();
+        std::fs::write(
+            dirs.user.join("old.desktop"),
+            overrides::render(DESKTOP, "Old").unwrap(),
+        )
+        .unwrap();
+        let (e, rx) = start(&f);
+        names_update(&rx);
+        // Reading the folder happens after the names are sent; a message
+        // that answers proves the start is done.
+        e.reset_app_name("zzz.desktop".into());
+        e.rename_app("b.desktop".into(), "B".into());
+        names_update(&rx);
+        stop(e);
+        assert!(
+            std::fs::read_to_string(dirs.user.join("a.desktop"))
+                .unwrap()
+                .contains("Name=Mine")
+        );
+        assert!(!dirs.user.join("old.desktop").exists());
+    }
+
+    #[test]
+    fn an_unreadable_names_file_removes_no_override() {
+        let mut f = fixture();
+        let dirs = with_apps(&mut f);
+        std::fs::create_dir_all(&dirs.user).unwrap();
+        let ours = overrides::render(DESKTOP, "Mine").unwrap();
+        std::fs::write(dirs.user.join("a.desktop"), &ours).unwrap();
+        std::fs::create_dir_all(&f.cfg.config_dir).unwrap();
+        // A folder where names.conf belongs: not readable as a file.
+        std::fs::create_dir(f.cfg.config_dir.join(NAMES_FILE)).unwrap();
+        let (e, rx) = start(&f);
+        assert_eq!(problem(&rx), ProblemKind::NamesUnreadable);
+        e.sync_overrides();
+        e.rename_app("b.desktop".into(), "B".into());
+        names_update(&rx);
+        stop(e);
+        assert_eq!(
+            std::fs::read_to_string(dirs.user.join("a.desktop")).unwrap(),
+            ours
+        );
+    }
+
+    #[test]
+    fn a_name_the_desktop_cannot_get_is_reported_and_kept() {
+        let mut f = fixture();
+        let dirs = with_apps(&mut f);
+        // The user's own file is in the way.
+        std::fs::create_dir_all(&dirs.user).unwrap();
+        let own = "[Desktop Entry]\nType=Application\nName=Hand made\nExec=x\n";
+        std::fs::write(dirs.user.join("a.desktop"), own).unwrap();
+        let (e, rx) = start(&f);
+        names_update(&rx);
+        e.rename_app("a.desktop".into(), "My Files".into());
+        assert_eq!(problem(&rx), ProblemKind::NameNotShared);
+        stop(e);
+        assert_eq!(
+            std::fs::read_to_string(dirs.user.join("a.desktop")).unwrap(),
+            own
+        );
+        // The launcher still has the name.
+        assert!(
+            std::fs::read_to_string(f.cfg.config_dir.join(NAMES_FILE))
+                .unwrap()
+                .contains("a.desktop=My Files")
+        );
     }
 
     #[test]

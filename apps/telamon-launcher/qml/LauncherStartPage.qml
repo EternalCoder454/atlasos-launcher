@@ -407,7 +407,10 @@ FocusScope {
     }
 
     // Soft edges where the page scrolls on, so a row cut by the panel's edge
-    // fades out instead of peeking half-drawn.
+    // fades out instead of peeking half-drawn. Only on the opaque panel: the
+    // fade lays the panel's colour over the page, and over the translucent
+    // panel (blur on) that colour, itself translucent, would show as a denser
+    // band; there the page is cut at its edge.
     component EdgeFade: Rectangle {
         property bool atTop: false
         anchors.left: parent.left
@@ -427,12 +430,12 @@ FocusScope {
     }
     EdgeFade {
         anchors.bottom: flick.bottom
-        visible: flick.contentY + flick.height < flick.contentHeight - 1
+        visible: !Appearance.effective && flick.contentY + flick.height < flick.contentHeight - 1
     }
     EdgeFade {
         anchors.top: flick.top
         atTop: true
-        visible: flick.contentY > 1
+        visible: !Appearance.effective && flick.contentY > 1
     }
 
     // Made the first time a letter heading is clicked.
