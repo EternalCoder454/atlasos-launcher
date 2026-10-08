@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-launcher
-Version:        0.3.3
+Version:        0.3.4
 Release:        1%{?dist}
 Summary:        Telamon Launcher, the Start menu and search of Telamon OS
 License:        MIT
@@ -127,6 +127,11 @@ test "$(readlink %{buildroot}%{_userunitdir}/atlas-launcher.service)" = telamon-
 %config(noreplace) %{_sysconfdir}/xdg/telamon-launcher/pinned.list
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.4-1
+- Fix: the app used about 8% of a core with its window idle. The icon layers added in the last release
+  were redrawn on every frame with Qt Quick's software renderer; a layer is live now only for a moment
+  after its icon changes (source, colour, size, state or theme).
+
 * Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.3-1
 - Fix: icons drawn over dialogs, popups and menus. With Qt Quick's software renderer a Kirigami.Icon was
   painted again over what sat in front of it whenever a repaint touched a part of it; the app's icons are
