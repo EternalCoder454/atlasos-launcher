@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::result::{Action, Kind, ResultItem, SessionAction, prior};
-use crate::text::{MAX_QUERY_CHARS, Prepared, Query, is_unsafe_char, score_fields};
+use crate::text::{MAX_QUERY_CHARS, Prepared, Query, clean_display, is_unsafe_char, score_fields};
 
 /// Most `PATH` folders scanned.
 pub const MAX_PATH_DIRS: usize = 64;
@@ -437,7 +437,8 @@ impl PathCache {
                 id: format!("run:{line}"),
                 kind: Kind::Command,
                 title: format!("Run ‘{shown}’"),
-                subtitle: path.clone(),
+                // Shown cleaned; the action keeps the path as it is.
+                subtitle: clean_display(path),
                 icon: "system-run".to_owned(),
                 score: 0.9 * p,
                 action: Action::Run {

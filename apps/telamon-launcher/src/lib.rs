@@ -39,6 +39,24 @@ pub extern "C" fn telamon_launcher_objects_new() -> LauncherObjects {
     }
 }
 
+/// Whether an absolute icon path may be handed to the image loaders: a
+/// non-empty regular file of at most 16 MiB, not on a pseudo file system
+/// (`telamon_launcher_core::text::icon_file_ok`). Called from `catalog.cpp`
+/// on a pool thread, never on the GUI thread (it does `stat`s).
+///
+/// # Safety
+/// `path` must be null or point to a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn telamon_launcher_icon_ok(path: *const std::ffi::c_char) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    // SAFETY: the caller promises a NUL-terminated string.
+    let c = unsafe { std::ffi::CStr::from_ptr(path) };
+    c.to_str()
+        .is_ok_and(telamon_launcher_core::text::icon_file_ok)
+}
+
 /// Called from `main.cpp` first thing, before anything reads the user's
 /// files: moves the folders of the old name (`~/.config/atlas-launcher`,
 /// `~/.local/state/atlas-launcher`, `atlas-launcherstaterc`) to the new ones,

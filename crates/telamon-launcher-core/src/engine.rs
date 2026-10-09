@@ -38,7 +38,7 @@ use crate::query::{self, Context, ResultSet, SearchOptions, Source, Sources};
 use crate::recent::{RecentError, RecentFiles};
 use crate::result::{Kind, ResultItem, prior};
 use crate::settings_index::{IndexError, SettingsIndex};
-use crate::text::Query;
+use crate::text::{Query, vetted_icon};
 use crate::usage::{self, UsageStore, learnable};
 
 /// Rows of each group on the Start page.
@@ -794,6 +794,14 @@ impl Search {
             return;
         };
         items.truncate(MAX_LATE_ITEMS);
+        // A plugin's icon may be a path: only a plain file of sane size goes
+        // on to the image loaders (a pipe would block the GUI thread's open).
+        // Here, on the search worker, where a stat may wait.
+        for it in &mut items {
+            if it.icon.starts_with('/') {
+                it.icon = vetted_icon(std::mem::take(&mut it.icon), "application-x-executable");
+            }
+        }
         let cx = Context {
             usage: &self.usage,
             opts: &self.opts,
@@ -1694,6 +1702,49 @@ mod tests {
         e.select(Some("fresh".into()));
         e.query(3, "alpha".into());
         assert!(!results(&rx, 3).iter().any(|i| i.id == "x"));
+        stop(e);
+    }
+
+    #[test]
+    fn a_late_icon_that_is_not_a_plain_file_never_reaches_the_loaders() {
+        use std::os::unix::ffi::OsStrExt;
+        let f = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let plain = dir.path().join("ok.png");
+        std::fs::write(&plain, b"png").unwrap();
+        let (e, rx) = start(&f);
+        e.set_apps(two_apps());
+        e.query(1, "alpha".into());
+        results(&rx, 1);
+        let with_icon = |id: &str, icon: &std::path::Path| {
+            let mut it = runner_item(id);
+            it.icon = icon.to_str().unwrap().to_owned();
+            it
+        };
+        e.merge(
+            1,
+            Source::Runner,
+            vec![
+                with_icon("pipe", &fifo),
+                with_icon("plain", &plain),
+                with_icon("gone", &dir.path().join("absent.png")),
+                {
+                    let mut it = runner_item("theme");
+                    it.icon = "folder".into();
+                    it
+                },
+            ],
+        );
+        let items = results(&rx, 1);
+        let icon = |id: &str| items.iter().find(|i| i.id == id).unwrap().icon.clone();
+        assert_eq!(icon("pipe"), "application-x-executable");
+        assert_eq!(icon("gone"), "application-x-executable");
+        assert_eq!(icon("plain"), plain.to_str().unwrap());
+        assert_eq!(icon("theme"), "folder");
         stop(e);
     }
 

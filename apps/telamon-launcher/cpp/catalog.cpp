@@ -8,20 +8,43 @@
 #include <KSycoca>
 
 #include <QDateTime>
+#include <QFile>
 #include <QFileInfo>
 #include <QLoggingCategory>
 #include <QMetaObject>
+#include <QStandardPaths>
 #include <QThreadPool>
 #include <QVariantList>
 #include <QVariantMap>
 
 Q_LOGGING_CATEGORY(lcCatalog, "telamon.launcher.catalog", QtInfoMsg)
 
+// Defined in src/lib.rs: whether an absolute icon path is a non-empty regular
+// file of at most 16 MiB that is not on /proc, /sys or another pseudo file
+// system (telamon_launcher_core::text::icon_file_ok).
+extern "C" bool telamon_launcher_icon_ok(const char *path);
+
 namespace
 {
 // A hostile desktop file cannot make the snapshot unbounded; the Rust side
 // validates and caps again.
 constexpr int kMaxApps = 20000;
+
+// The icon of a catalogue entry as the panel may load it: a theme name as it
+// is, an absolute path only when the core says it is a plain file (links
+// followed, as icon themes use them); "" otherwise, which the panel shows as
+// the generic icon. A pipe named by `Icon=` made the image loader wait in
+// open() on the GUI thread for good (measured: the launcher stopped
+// answering); a device or a huge file would be read into memory whole
+// (docs/SECURITY.md). Stats, no open. Off the GUI thread (the caller is on the
+// pool).
+QString vettedIcon(const QString &icon)
+{
+    if (!icon.startsWith(QLatin1Char('/'))) {
+        return icon;
+    }
+    return telamon_launcher_icon_ok(QFile::encodeName(icon).constData()) ? icon : QString();
+}
 
 // The binary's file name in an Exec line: skips `env` and VAR=value words.
 QString execName(const QString &exec)
@@ -60,7 +83,10 @@ QVariantMap appMap(const KService &service)
     // and menus show the name too) says what the app's own name was: the
     // catalogue keeps that as the app's, and names.conf puts the user's on
     // top, as before.
-    const bool renamed = service.property<QString>(QStringLiteral("X-Telamon-Renamed")) == QLatin1String("true");
+    // The marker means something only in the user's own applications folder,
+    // where the launcher writes; in any other desktop file it is just a key.
+    const bool marked = service.property<QString>(QStringLiteral("X-Telamon-Renamed")) == QLatin1String("true");
+    const bool renamed = marked && service.entryPath().startsWith(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QLatin1String("/applications/"));
     const QString original = renamed ? service.property<QString>(QStringLiteral("X-Telamon-Original-Name")) : QString();
     map.insert(QStringLiteral("name"), original.isEmpty() ? service.name() : original);
     map.insert(QStringLiteral("genericName"), service.genericName());
@@ -150,6 +176,12 @@ void Catalog::rebuild()
             installed.insert(path, time);
             QVariantMap map = apps.at(i).toMap();
             map.insert(QStringLiteral("installed"), time);
+            map.insert(QStringLiteral("icon"), vettedIcon(map.value(QStringLiteral("icon")).toString()));
+            QStringList actionIcons = map.value(QStringLiteral("actionIcons")).toStringList();
+            for (QString &actionIcon : actionIcons) {
+                actionIcon = vettedIcon(actionIcon);
+            }
+            map.insert(QStringLiteral("actionIcons"), actionIcons);
             apps[i] = map;
         }
         // `this` is the context: the call is dropped if the catalogue is gone.

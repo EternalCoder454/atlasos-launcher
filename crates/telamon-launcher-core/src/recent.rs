@@ -356,7 +356,10 @@ pub(crate) fn icon_for(f: &RecentFile) -> String {
         _ if m == "application/pdf" => "application-pdf".into(),
         _ => {
             let dashed = m.replace('/', "-");
-            if dashed.len() <= 128
+            // A theme icon name like any other: it starts with a letter or a
+            // digit (a mime type may start with "-" or "."), so it is never
+            // taken for an option or a hidden name.
+            if crate::text::valid_icon_name(&dashed)
                 && dashed
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
@@ -979,5 +982,27 @@ mod tests {
             let _ = href_to_path(&t);
             let _ = href_to_path(&format!("file://{t}"));
         }
+    }
+
+    #[test]
+    fn a_mime_type_never_makes_a_bad_icon_name() {
+        // A mime type may start with "-" or "."; its icon name must not.
+        let f = |m: &str| RecentFile {
+            uri: "file:///a".into(),
+            path: PathBuf::from("/a"),
+            name: "a".into(),
+            mime: Some(m.to_owned()),
+            when: 0,
+            is_dir: false,
+        };
+        for bad in ["-w/q", ".x/y", "-/-", "a/-b-", "x/.hidden"] {
+            let icon = icon_for(&f(bad));
+            assert!(
+                crate::text::valid_icon_name(&icon),
+                "{bad} gave the icon {icon}"
+            );
+        }
+        assert_eq!(icon_for(&f("application/zip")), "application-zip");
+        assert_eq!(icon_for(&f("-w/q")), "text-x-generic");
     }
 }

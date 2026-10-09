@@ -1,6 +1,7 @@
 #include "actions.h"
 
 #include "executor.h"
+#include "validate.h"
 
 #include <KRecentDocument>
 #include <KUser>
@@ -31,28 +32,10 @@ Q_LOGGING_CATEGORY(lcActions, "telamon.launcher.actions", QtInfoMsg)
 
 namespace
 {
-constexpr int kMaxFlatpakIdLength = 255;
 constexpr int kMaxTextLength = 1 << 20;
 constexpr qint64 kMaxIconBytes = 16 << 20;
 // The user picture is shown small; a header that claims more is not decoded.
 constexpr int kMaxIconSide = 4096;
-
-// A Flatpak id: reverse-DNS, 3+ parts, no leading dash (it becomes an
-// argument of telamon-store).
-bool validFlatpakId(const QString &id)
-{
-    static const QRegularExpression pattern(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._-]*$"));
-    if (id.isEmpty() || id.size() > kMaxFlatpakIdLength || !pattern.match(id).hasMatch()) {
-        return false;
-    }
-    const QStringList parts = id.split(QLatin1Char('.'));
-    if (parts.size() < 3) {
-        return false;
-    }
-    return std::none_of(parts.cbegin(), parts.cend(), [](const QString &part) {
-        return part.isEmpty();
-    });
-}
 
 // The picture is a path AccountsService stores for the user: it must be an
 // absolute regular file (not a link, so nothing can point it elsewhere) that
@@ -98,7 +81,7 @@ QString Actions::userName() const
     // password database (which can be slow behind NSS).
     if (m_userName.isEmpty() && !m_userNameRead) {
         m_userNameRead = true;
-        m_userName = qEnvironmentVariable("USER");
+        m_userName = Validate::displayText(qEnvironmentVariable("USER"), 256);
         if (m_userName.isEmpty()) {
             m_userName = KUser().loginName();
         }
@@ -181,7 +164,9 @@ void Actions::loadUser()
             if (!values.isValid()) {
                 return;
             }
-            const QString realName = values.value().value(QStringLiteral("RealName")).toString().trimmed().left(256);
+            // From a system service, but another user with admin rights sets it:
+            // shown as plain text and cleaned of control and bidi characters.
+            const QString realName = Validate::displayText(values.value().value(QStringLiteral("RealName")).toString(), 256);
             if (!realName.isEmpty()) {
                 m_userName = realName;
             }
@@ -240,7 +225,7 @@ void Actions::removeRecent(const QString &uri)
 
 void Actions::openAppSettings(const QString &desktopId)
 {
-    if (desktopId.isEmpty() || desktopId.size() > 255) {
+    if (!Validate::desktopId(desktopId)) {
         Q_EMIT failed(QStringLiteral("BadArgument"));
         return;
     }
@@ -265,7 +250,7 @@ void Actions::openFiles()
 
 void Actions::uninstall(const QString &flatpakId)
 {
-    if (!validFlatpakId(flatpakId)) {
+    if (!Validate::flatpakId(flatpakId)) {
         Q_EMIT failed(QStringLiteral("BadArgument"));
         return;
     }

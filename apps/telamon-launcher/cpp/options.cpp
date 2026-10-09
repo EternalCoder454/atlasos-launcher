@@ -1,9 +1,12 @@
 #include "options.h"
 
+#include "validate.h"
+
 #include <KConfigGroup>
 
 #include <QLocale>
 #include <QMetaObject>
+#include <QStandardPaths>
 #include <QVariantMap>
 
 namespace
@@ -29,6 +32,9 @@ bool runnerEnabled(const KConfigGroup &plugins, const QString &bare, bool fallba
 
 // Engines the Rust side knows; anything else it replaces by the default.
 constexpr int kMaxEngineLength = 32;
+// state.conf holds one number; Qt's Settings reads the whole file when the
+// Start page is made, on the GUI thread, and opens it as it is.
+constexpr qint64 kMaxStateBytes = 64 * 1024;
 }
 
 Options::Options(QObject *backend, QObject *parent)
@@ -55,6 +61,19 @@ bool Options::showRecent() const
 bool Options::showRecentFiles() const
 {
     return m_showRecentFiles;
+}
+
+QUrl Options::stateConfig() const
+{
+    // A pipe in its place would block the GUI thread in the open for good (the
+    // Start page is made while the panel loads): measured, the launcher then
+    // never finished starting. Anything but a plain small file (or no file
+    // yet) means the view is simply not remembered. docs/SECURITY.md.
+    const QString path = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QLatin1String("/telamon-launcher/state.conf");
+    if (Validate::plainSmallFile(path, kMaxStateBytes)) {
+        return QUrl::fromLocalFile(path);
+    }
+    return QUrl::fromLocalFile(QStringLiteral("/dev/null"));
 }
 
 void Options::reload(bool krunner)
