@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Not published to crates.io (cargo-deny then treats path dependencies as local).
+publish = false
 build = "build.rs"
 
 # CMake (Corrosion) links the static library into the C++ executable.
