@@ -52,11 +52,11 @@ BuildRequires:  cmake(LayerShellQt)
 # QML modules qmlcachegen resolves at build time (not linked). telamon-ui comes
 # from atlas-framework, which is in no repository (the dev image has it).
 BuildRequires:  kf6-kirigami-devel
-BuildRequires:  telamon-ui >= 2.0.0
+BuildRequires:  telamon-ui >= 2.0.9
 
 Requires:       kf6-kirigami
 # Telamon.Ui, the shared look (atlas-framework)
-Requires:       telamon-ui >= 2.0.0
+Requires:       telamon-ui >= 2.0.9
 Requires:       kf6-qqc2-desktop-style
 Requires:       qt6-qtdeclarative
 Requires:       qt6-qtsvg

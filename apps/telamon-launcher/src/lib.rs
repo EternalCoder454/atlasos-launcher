@@ -9,7 +9,7 @@ telamon_framework_ui::app! {
     name: "Telamon Launcher",
     id: "net.eterneon.telamon.launcher",
     repo: "atlasos-launcher",
-    ui: "2.0.0",
+    ui: "2.0.9",
 }
 
 use std::ffi::c_void;

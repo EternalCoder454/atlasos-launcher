@@ -4,7 +4,7 @@ The Start menu and search of Telamon OS, a Fedora Kinoite 44 bootc image (repo
 `~/Documents/Projects/AtlasOS/AtlasOS`, read-only from here). It replaces the
 vendored Andromeda Launcher (Meta, the dock's first item) and KRunner
 (Alt+Space). Rust + CXX-Qt + Qt 6.11 Quick + Kirigami on Atlas Framework
-(`v1.4.0`), plus the KDE C++ libraries only C++ can reach (LayerShellQt,
+(`v2.0.9`), plus the KDE C++ libraries only C++ can reach (LayerShellQt,
 KRunner, KIO, KGlobalAccel, KService).
 
 Read `docs/DESIGN.md` first, and `docs/SECURITY.md` (the threat model, the rule

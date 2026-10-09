@@ -13,7 +13,7 @@ rust-version = "1.89"
 # The atlas-framework crates (startup, settings, logging, crash reports); to
 # move the pin, see CLAUDE.md. Telamon.Ui is not pinned here: it is the
 # installed telamon-ui package.
-telamon-framework-ui = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.0" }
+telamon-framework-ui = { git = "https://github.com/EternalCoder454/atlas-framework", tag = "v2.0.9" }
 log = { version = "0.4", features = ["std"] }
 
 [profile.release]
