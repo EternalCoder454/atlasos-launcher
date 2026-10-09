@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::result::{Action, Kind, ResultItem, SessionAction, prior};
-use crate::text::{MAX_QUERY_CHARS, Prepared, Query, is_unsafe_char, score_fields};
+use crate::text::{MAX_QUERY_CHARS, Prepared, Query, clean_display, is_unsafe_char, score_fields};
 
 /// Most `PATH` folders scanned.
 pub const MAX_PATH_DIRS: usize = 64;
@@ -315,6 +315,14 @@ fn shown_line(line: &str) -> String {
     out
 }
 
+/// Whether a `PATH` entry is an absolute path the launcher will run things from:
+/// a leading `/` (not `//`) and no `..` segment. The C++ side requires the same
+/// of the program it starts (`Validate::commandPath`), so a row is never offered
+/// for a path it would refuse.
+fn plain_absolute_dir(dir: &str) -> bool {
+    dir.starts_with('/') && !dir.starts_with("//") && !dir.split('/').any(|seg| seg == "..")
+}
+
 /// The executables on `PATH`, listed once (off the GUI thread). Typed
 /// commands must name one of these exactly.
 #[derive(Debug, Default)]
@@ -344,7 +352,7 @@ impl PathCache {
             if cache.dirs.len() >= MAX_PATH_DIRS {
                 break;
             }
-            if !dir.starts_with('/') || !seen.insert(dir) {
+            if !plain_absolute_dir(dir) || !seen.insert(dir) {
                 continue;
             }
             let dir_path = Path::new(dir);
@@ -437,7 +445,8 @@ impl PathCache {
                 id: format!("run:{line}"),
                 kind: Kind::Command,
                 title: format!("Run ‘{shown}’"),
-                subtitle: path.clone(),
+                // Shown cleaned; the action keeps the path as it is.
+                subtitle: clean_display(path),
                 icon: "system-run".to_owned(),
                 score: 0.9 * p,
                 action: Action::Run {
@@ -848,5 +857,27 @@ mod tests {
             }
             let _ = c.search(&q(&line));
         }
+    }
+
+    #[test]
+    fn path_entries_the_cpp_side_would_refuse_are_not_scanned() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let tool = bin.join("sectool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plain = bin.to_str().unwrap().to_owned();
+        assert!(PathCache::scan(&plain).lookup("sectool").is_some());
+        // The same folder by a path with "..", with a leading "//", or relative.
+        let dotdot = format!("{}/../bin", bin.to_str().unwrap());
+        assert!(PathCache::scan(&dotdot).lookup("sectool").is_none());
+        let double = format!("/{plain}");
+        assert!(PathCache::scan(&double).lookup("sectool").is_none());
+        assert!(PathCache::scan("bin").lookup("sectool").is_none());
+        // One bad entry does not hide a good one.
+        let mixed = format!("{dotdot}:{plain}");
+        assert!(PathCache::scan(&mixed).lookup("sectool").is_some());
     }
 }

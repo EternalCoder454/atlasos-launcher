@@ -139,8 +139,12 @@ Window {
             startPage.reset()
             root.backend.refresh()
             // Setting the text starts the query (an empty one clears the list).
-            field.text = query
-            root.needsInteraction = query.length > 0
+            // The text came from another process (D-Bus Show, --search): it is
+            // cleaned like typed text, so what the field shows is what is
+            // searched for.
+            const cleaned = root.backend.cleanQuery(query)
+            field.text = cleaned
+            root.needsInteraction = cleaned.length > 0
             resultList.clickAllowedAt = Date.now() + 500
             resultList.moved = false
             field.forceActiveFocus()

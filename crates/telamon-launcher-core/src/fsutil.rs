@@ -16,14 +16,35 @@ use std::time::{Duration, SystemTime};
 /// reading at most `cap + 1` bytes, not by trusting the size in the metadata);
 /// anything that isn't a regular file is `InvalidInput`. Follows symlinks.
 pub fn read_capped(path: &Path, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    read_capped_with(path, cap, 0)
+}
+
+/// [`read_capped`], but a symlink at `path` itself is refused (`InvalidInput`,
+/// opened with `O_NOFOLLOW`) instead of followed: for files in folders other
+/// programs may write to (the user's `applications` folder), where a link
+/// planted at a name must not make the launcher read, or act on, what it
+/// points at. Links in the folders above `path` are still followed.
+pub fn read_capped_nofollow(path: &Path, cap: u64) -> io::Result<Option<Vec<u8>>> {
+    read_capped_with(path, cap, libc::O_NOFOLLOW)
+}
+
+fn read_capped_with(path: &Path, cap: u64, flags: libc::c_int) -> io::Result<Option<Vec<u8>>> {
     // O_NONBLOCK so that opening a FIFO put there by mistake can't hang us.
     let file = match OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | flags)
         .open(path)
     {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        // O_NOFOLLOW on a link: ELOOP (a link to a directory may say ENOTDIR
+        // on other systems; both are "not a plain file").
+        Err(e) if flags != 0 && e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file (a link)",
+            ));
+        }
         Err(e) => return Err(e),
     };
     if !file.metadata()?.is_file() {
@@ -108,6 +129,36 @@ fn is_temp_tail(s: &[u8]) -> bool {
 /// swapping a path component for a symlink mid-way can't redirect them.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let target = resolve_link(path)?;
+    write_in_dir(&target, bytes, mode, false, false)
+}
+
+/// [`write_atomic`] for a name in a folder other programs may write to (the
+/// user's `applications` folder): a symlink at `path` is **not** followed. The
+/// target must be absent or a regular file (`InvalidInput` for a link, a
+/// folder, a pipe...); the new file replaces it by rename, so a link is never
+/// written through. A name that is absent is taken with
+/// `renameat2(RENAME_NOREPLACE)`, so a file that appeared since the caller
+/// looked is not clobbered (`AlreadyExists`). Links in the folders above
+/// `path` are followed, as a dotfiles manager may use them.
+pub fn write_atomic_nofollow(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    write_in_dir(path, bytes, mode, true, false)
+}
+
+/// [`write_atomic_nofollow`] for a name the caller found **absent**: it makes
+/// the file only if the name is still free at the rename (`AlreadyExists`
+/// otherwise, whatever has appeared there: a file, a link, a pipe), so the
+/// caller's look and the write cannot disagree about what is replaced.
+pub fn create_atomic_nofollow(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    write_in_dir(path, bytes, mode, true, true)
+}
+
+fn write_in_dir(
+    target: &Path,
+    bytes: &[u8],
+    mode: u32,
+    strict: bool,
+    create_only: bool,
+) -> io::Result<()> {
     let name = target
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
@@ -131,9 +182,30 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     // loosened or tightened them); `mode` only applies to a new file.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: `dfd` is a live directory fd, `final_name` a valid C string and
-    // `st` a writable stat buffer.
-    let existing = unsafe { libc::fstatat(dfd, final_name.as_ptr(), &mut st, 0) } == 0
-        && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+    // `st` a writable stat buffer. A strict write looks at the name itself
+    // (a link is seen as a link), the other at what it points to.
+    let seen = unsafe {
+        libc::fstatat(
+            dfd,
+            final_name.as_ptr(),
+            &mut st,
+            if strict { libc::AT_SYMLINK_NOFOLLOW } else { 0 },
+        )
+    } == 0;
+    let existing = seen && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+    if strict && seen && !existing {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if create_only && seen {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the name is taken",
+        ));
+    }
+    let noreplace = strict && (!seen || create_only);
     let mode = if existing {
         // Never setuid, setgid or sticky, whatever the old file had.
         (st.st_mode & 0o777) as u32
@@ -148,7 +220,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         tmp.extend_from_slice(&stem);
         tmp.extend_from_slice(format!(".tmp-{}-{}", std::process::id(), n).as_bytes());
         let tmp_name = cstr(&OsString::from_vec(tmp))?;
-        match write_via_temp(dfd, &tmp_name, &final_name, bytes, mode) {
+        match write_via_temp(dfd, &tmp_name, &final_name, bytes, mode, noreplace) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last_err = Some(e),
             Err(e) => return Err(e),
             Ok(()) => {
@@ -243,12 +315,66 @@ pub fn sweep_stale_temps(dir: &Path, name: &str, older_than: Duration) -> usize 
     removed
 }
 
+/// A test hook just before the rename of [`write_via_temp`]: where a file
+/// appearing at the name would be clobbered without `RENAME_NOREPLACE`.
+#[cfg(test)]
+pub(crate) mod hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        pub static BEFORE_RENAME: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    pub fn before_rename() {
+        BEFORE_RENAME.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f();
+            }
+        });
+    }
+}
+
+/// Renames `from` to `to` in the folder `dfd`; with `noreplace` the name `to`
+/// must not exist (`RENAME_NOREPLACE`; a file system that cannot do that
+/// falls back to a plain rename).
+fn rename_in(dfd: RawFd, from: &CString, to: &CString, noreplace: bool) -> io::Result<()> {
+    if noreplace {
+        // SAFETY: both names are valid C strings relative to `dfd`.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                dfd,
+                from.as_ptr(),
+                dfd,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if !matches!(
+            e.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP)
+        ) {
+            return Err(e);
+        }
+    }
+    // SAFETY: both names are valid C strings relative to `dfd`.
+    if unsafe { libc::renameat(dfd, from.as_ptr(), dfd, to.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn write_via_temp(
     dfd: RawFd,
     tmp: &CString,
     final_name: &CString,
     bytes: &[u8],
     mode: u32,
+    noreplace: bool,
 ) -> io::Result<()> {
     // SAFETY: `dfd` is a live directory descriptor and `tmp` a valid C string.
     let fd = unsafe {
@@ -272,11 +398,9 @@ fn write_via_temp(
         }
         file.write_all(bytes)?;
         file.sync_all()?;
-        // SAFETY: both names are valid C strings relative to `dfd`.
-        if unsafe { libc::renameat(dfd, tmp.as_ptr(), dfd, final_name.as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        #[cfg(test)]
+        hooks::before_rename();
+        rename_in(dfd, tmp, final_name, noreplace)
     })();
     drop(file);
     if result.is_err() {
@@ -532,5 +656,178 @@ mod tests {
             fs::metadata(&n).unwrap().permissions().mode() & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn nofollow_read_refuses_a_link_and_reads_a_file() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("f");
+        fs::write(&f, b"x").unwrap();
+        let l = d.path().join("l");
+        symlink(&f, &l).unwrap();
+        assert_eq!(read_capped_nofollow(&f, 10).unwrap().unwrap(), b"x");
+        // The plain read follows the link; the other one does not.
+        assert_eq!(read_capped(&l, 10).unwrap().unwrap(), b"x");
+        let e = read_capped_nofollow(&l, 10).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        // A dangling link, a link to a folder, a folder: refused, not "absent".
+        let dangling = d.path().join("dangling");
+        symlink(d.path().join("nowhere"), &dangling).unwrap();
+        assert!(read_capped_nofollow(&dangling, 10).is_err());
+        let dl = d.path().join("dl");
+        symlink(d.path(), &dl).unwrap();
+        assert!(read_capped_nofollow(&dl, 10).is_err());
+        assert!(read_capped_nofollow(d.path(), 10).is_err());
+        assert!(
+            read_capped_nofollow(&d.path().join("absent"), 10)
+                .unwrap()
+                .is_none()
+        );
+        // Over the cap is still an error.
+        assert_eq!(
+            read_capped_nofollow(&f, 0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn nofollow_write_never_writes_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim");
+        fs::write(&victim, b"precious").unwrap();
+        let l = d.path().join("l.desktop");
+        symlink(&victim, &l).unwrap();
+        let e = write_atomic_nofollow(&l, b"overwritten", 0o644).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&victim).unwrap(), b"precious");
+        assert!(fs::symlink_metadata(&l).unwrap().file_type().is_symlink());
+        // The ordinary write does follow it (a dotfiles manager's link).
+        write_atomic(&l, b"through", 0o600).unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"through");
+        // A dangling link is refused too: nothing is created where it points.
+        let d2 = d.path().join("d2.desktop");
+        let target = d.path().join("created-by-the-link");
+        symlink(&target, &d2).unwrap();
+        assert!(write_atomic_nofollow(&d2, b"x", 0o644).is_err());
+        assert!(!target.exists());
+        // A folder, and a pipe, in the way.
+        let dir = d.path().join("dir.desktop");
+        fs::create_dir(&dir).unwrap();
+        assert!(write_atomic_nofollow(&dir, b"x", 0o644).is_err());
+        let fifo = d.path().join("fifo.desktop");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(write_atomic_nofollow(&fifo, b"x", 0o644).is_err());
+        // No temp file is left behind by any of it.
+        let left: Vec<_> = fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn nofollow_write_creates_and_replaces_regular_files() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("new.desktop");
+        write_atomic_nofollow(&p, b"one", 0o644).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"one");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        // An existing file keeps its mode and is replaced.
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic_nofollow(&p, b"two", 0o644).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // Setuid, setgid and sticky never come through.
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o4755)).unwrap();
+        write_atomic_nofollow(&p, b"three", 0o644).unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn a_name_that_appeared_is_not_clobbered_by_a_new_file() {
+        // The write looked, saw nothing, and made a temp file; then someone
+        // made the name. RENAME_NOREPLACE keeps theirs.
+        let d = tempfile::tempdir().unwrap();
+        let dir_file = File::open(d.path()).unwrap();
+        let dfd = dir_file.as_raw_fd();
+        fs::write(d.path().join(".tmp"), b"ours").unwrap();
+        fs::write(d.path().join("final"), b"theirs").unwrap();
+        let (tmp, fin) = (
+            CString::new(".tmp").unwrap(),
+            CString::new("final").unwrap(),
+        );
+        let e = rename_in(dfd, &tmp, &fin, true).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(d.path().join("final")).unwrap(), b"theirs");
+        // Without the flag the rename replaces, as write_atomic always did.
+        rename_in(dfd, &tmp, &fin, false).unwrap();
+        assert_eq!(fs::read(d.path().join("final")).unwrap(), b"ours");
+    }
+
+    #[test]
+    fn create_only_never_replaces_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f.desktop");
+        create_atomic_nofollow(&p, b"first", 0o644).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"first");
+        let e = create_atomic_nofollow(&p, b"second", 0o644).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&p).unwrap(), b"first");
+        // A link, even a dangling one, is a taken name.
+        let l = d.path().join("l.desktop");
+        symlink(d.path().join("nowhere"), &l).unwrap();
+        assert!(create_atomic_nofollow(&l, b"x", 0o644).is_err());
+        assert!(!d.path().join("nowhere").exists());
+        let left = fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_file_that_appears_before_the_rename_is_kept_by_the_writers() {
+        // The writer looked and saw the name free; its temp file is written;
+        // then something takes the name. The create-only writer and the
+        // replacing writer on an absent name must both keep theirs.
+        for create_only in [true, false] {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("f.desktop");
+            let q = p.clone();
+            hooks::BEFORE_RENAME.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || fs::write(&q, b"theirs").unwrap()));
+            });
+            let r = if create_only {
+                create_atomic_nofollow(&p, b"ours", 0o644)
+            } else {
+                write_atomic_nofollow(&p, b"ours", 0o644)
+            };
+            hooks::BEFORE_RENAME.with(|h| *h.borrow_mut() = None);
+            assert_eq!(
+                r.unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists,
+                "{create_only}"
+            );
+            assert_eq!(fs::read(&p).unwrap(), b"theirs", "{create_only}");
+            let left = fs::read_dir(d.path())
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                .count();
+            assert_eq!(left, 0, "the temp file is removed");
+        }
     }
 }

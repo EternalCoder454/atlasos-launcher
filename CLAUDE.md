@@ -4,10 +4,12 @@ The Start menu and search of Telamon OS, a Fedora Kinoite 44 bootc image (repo
 `~/Documents/Projects/AtlasOS/AtlasOS`, read-only from here). It replaces the
 vendored Andromeda Launcher (Meta, the dock's first item) and KRunner
 (Alt+Space). Rust + CXX-Qt + Qt 6.11 Quick + Kirigami on Atlas Framework
-(`v1.4.0`), plus the KDE C++ libraries only C++ can reach (LayerShellQt,
+(`v2.0.9`), plus the KDE C++ libraries only C++ can reach (LayerShellQt,
 KRunner, KIO, KGlobalAccel, KService).
 
-Read `docs/DESIGN.md` first. It fixes:
+Read `docs/DESIGN.md` first, and `docs/SECURITY.md` (the threat model, the rule
+for each entry point and the test that keeps it true) before touching anything
+that reads, writes, parses, launches or exposes something. DESIGN.md fixes:
 - the form (a resident layer-shell process plus a QML-only dock button);
 - the D-Bus interface and files;
 - the search phases and stability rules;
@@ -55,6 +57,13 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
   - the user's own `launcher.conf`, `pinned.list` and `usage.tsv`.
   Every `Text`/`Label` showing app, file, plugin or query text sets
   `textFormat: Text.PlainText`.
+- **Files other programs can touch are never opened blindly.** Rust reads go
+  through `fsutil::read_capped` (non-blocking, regular files only, a size cap);
+  a path handed to Qt or KDE (which open it as it is, on the asking thread) goes
+  through `Validate::plainSmallFile` first, an absolute icon path through
+  `text::icon_file_ok`: a pipe in the place of a file blocked the GUI thread for
+  good. Writes into the user's `applications` folder use `write_atomic_nofollow`.
+  docs/SECURITY.md has the rest.
 - **Never log what the user typed or ran**: no query text, file names or
   paths. Only timings, counts and error kinds.
 - **The GUI thread never blocks.** Queries, merging and file work run on the
@@ -88,7 +97,12 @@ is `~/Documents/Atlas Framework` (read-only from here; its reference is
 | App build | `scripts/dev.sh bash -c 'cmake -S apps/telamon-launcher -B /work/cmake/dev -G Ninja && cmake --build /work/cmake/dev'` |
 | QML lint | `scripts/dev.sh qmllint-qt6 apps/telamon-launcher/qml/*.qml plasmoid/*/contents/ui/*.qml` |
 | Telamon checks | `scripts/dev.sh bash -c '$TELAMON_FRAMEWORK/tools/lint-app.sh . && $TELAMON_FRAMEWORK/tools/check-app-names.sh .'` |
-| RPM | `scripts/dev.sh packaging/build-rpm.sh /work/out` |
+| RPM | `scripts/dev.sh packaging/build-rpm.sh /work/out` (`%check` runs ctest, `scripts/check-hardening.sh` and `annocheck`) |
+| Property tests, long run | `scripts/dev.sh env PROPTEST_CASES=20000 cargo test --workspace --locked -- props` |
+| C++ tests | `scripts/dev.sh bash -c 'cmake -S apps/telamon-launcher -B /work/cmake/dev -G Ninja -DTELAMON_LAUNCHER_BUILD_TESTS=ON && cmake --build /work/cmake/dev && ctest --test-dir /work/cmake/dev --output-on-failure'` |
+| D-Bus and special-file probe | `scripts/dev.sh bash scripts/headless-dbus-security.sh /work/cmake/dev/telamon-launcher` |
+| Hardening check's own test | `scripts/dev.sh scripts/test-check-hardening.sh` |
+| Supply chain | `cargo deny check` and `cargo audit` (config: `deny.toml`; CI: `security.yml`) |
 
 `scripts/dev.sh` builds `localhost/telamon-launcher-dev:44` from
 `ci/Containerfile`'s `dev` target:

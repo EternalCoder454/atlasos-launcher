@@ -114,6 +114,12 @@ jobs:
       - name: Desktop files
         run: find . -name '*.desktop' -not -path './target/*' -print0 | xargs -0 -r desktop-file-validate
 
+      # The check the RPM build runs on the finished program (PIE, RELRO,
+      # BIND_NOW, stack protector...), against small programs with and
+      # without the hardening: it must name what is missing (docs/SECURITY.md).
+      - name: Hardening check
+        run: scripts/test-check-hardening.sh
+
   clippy:
     name: Clippy
     needs: [image, lint]
@@ -132,11 +138,11 @@ jobs:
         with:
           persist-credentials: false
       - run: echo /usr/lib64/ccache >> "$GITHUB_PATH"
-      # Main saves the caches, pull requests only read them.
+      # A push to main saves the caches, pull requests only read them.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: clippy
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: ccache
         with:
@@ -148,7 +154,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: ccache --show-stats
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: github.ref == 'refs/heads/main' && steps.ccache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ccache.outputs.cache-hit != 'true'
         with:
           path: /tmp/ccache
           key: ccache-clippy-${{ github.sha }}
@@ -174,7 +180,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: test
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: ccache
         with:
@@ -184,9 +190,15 @@ jobs:
       # The whole workspace: the core's unit tests and fixtures.
       - name: Tests
         run: cargo test --workspace --locked
+      # The property tests at length (every test in a module named `props`),
+      # as docs/SECURITY.md says; the default run above does 256 cases each.
+      - name: Property tests (20,000 cases)
+        env:
+          PROPTEST_CASES: "20000"
+        run: cargo test --workspace --locked -- props
       - run: ccache --show-stats
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: github.ref == 'refs/heads/main' && steps.ccache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ccache.outputs.cache-hit != 'true'
         with:
           path: /tmp/ccache
           key: ccache-test-${{ github.sha }}
@@ -215,18 +227,20 @@ jobs:
         with:
           shared-key: rpm
           cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: ccache
         with:
           path: /tmp/ccache
           key: ccache-rpm-${{ github.sha }}
           restore-keys: ccache-rpm-
+      # The package's %check runs the C++ tests (ctest) and the hardening check
+      # on the finished program.
       - name: Build the RPM
         run: packaging/build-rpm.sh "$GITHUB_WORKSPACE/out"
       - run: ccache --show-stats
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: github.ref == 'refs/heads/main' && steps.ccache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ccache.outputs.cache-hit != 'true'
         with:
           path: /tmp/ccache
           key: ccache-rpm-${{ github.sha }}

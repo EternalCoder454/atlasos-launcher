@@ -1,0 +1,62 @@
+# cargo-deny: what may be in the dependency tree of Telamon Launcher
+# (docs/SECURITY.md, "Build hardening and supply chain"). CI runs
+# `cargo deny check` on every change to the dependencies and every week
+# (.github/workflows/security.yml); locally:
+#   cargo install --locked cargo-deny && cargo deny check
+
+[graph]
+# What the package is built for (Telamon OS images are x86_64 and aarch64
+# Fedora); crates only for other systems are not looked at.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+version = 2
+# A known vulnerability, an unmaintained crate or a yanked version in the lock
+# file fails the check. Ignore an advisory only with the reason and a date to
+# look at it again, in `ignore = [{ id = "RUSTSEC-...", reason = "..." }]`.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+version = 2
+# The launcher is MIT; these are the licences its dependencies come under.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate are common in a tree this size (cxx-qt and its
+# dependencies, the framework's); they are listed, not refused.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+    # The launcher uses no network of its own (the web row opens the browser);
+    # a TLS or HTTP stack in the tree would be a surprise worth a review.
+    { crate = "openssl", reason = "the launcher has no TLS of its own; a library in the tree is new attack surface" },
+    { crate = "openssl-sys", reason = "see openssl" },
+    { crate = "native-tls", reason = "see openssl" },
+    { crate = "rustls", reason = "see openssl" },
+    { crate = "reqwest", reason = "see openssl" },
+    { crate = "ureq", reason = "see openssl" },
+    { crate = "hyper", reason = "see openssl" },
+]
+
+[sources]
+# crates.io and the one repository the launcher pins, by tag (see CLAUDE.md,
+# "Moving the atlas-framework pin").
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/EternalCoder454/atlas-framework",
+]

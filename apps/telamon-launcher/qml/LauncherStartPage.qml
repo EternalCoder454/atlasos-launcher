@@ -184,7 +184,9 @@ FocusScope {
 
     Settings {
         id: viewState
-        location: StandardPaths.writableLocation(StandardPaths.GenericConfigLocation) + "/telamon-launcher/state.conf"
+        // state.conf, or /dev/null when that is not a plain small file (a pipe
+        // there would block the panel's start): Options::stateConfig.
+        location: page.options.stateConfig
         category: "Start"
         property int appView: 0
     }

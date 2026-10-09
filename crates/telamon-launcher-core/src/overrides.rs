@@ -38,9 +38,11 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::catalog::valid_desktop_id;
-use crate::fsutil::{read_capped, write_atomic};
+use crate::fsutil::{
+    create_atomic_nofollow, read_capped, read_capped_nofollow, write_atomic_nofollow,
+};
 use crate::legacy::desktop_id_alias;
-use crate::names::Names;
+use crate::names::{Names, clean_name};
 
 /// `true` in an override the launcher made.
 pub const RENAMED_KEY: &str = "X-Telamon-Renamed";
@@ -137,6 +139,13 @@ fn escape(name: &str) -> String {
 /// an application's desktop file.
 pub fn render(original: &str, name: &str) -> Option<String> {
     if original.contains('\0') || entry_value(original, "Type") != Some("Application") {
+        return None;
+    }
+    // A name that `clean_name` would change (a line break, a control, bidi or
+    // invisible character, too long, empty) is refused here too: this is the
+    // line that is written into a file the whole desktop reads, so it does not
+    // rely on the caller having cleaned it.
+    if name.is_empty() || clean_name(name) != name {
         return None;
     }
     let own = entry_value(original, "Name").unwrap_or("");
@@ -245,6 +254,38 @@ fn find_original(dirs: &AppDirs, id: &str) -> Option<(PathBuf, String, i64)> {
     None
 }
 
+/// Test hooks between the steps of [`apply`], to put something in the way at
+/// the moment a race would: after `existing` has looked at the path, and just
+/// before the file is written.
+#[cfg(test)]
+mod hooks {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Hook = Box<dyn Fn(&Path)>;
+
+    thread_local! {
+        pub static AFTER_LOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        pub static BEFORE_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub fn after_look(path: &Path) {
+        AFTER_LOOK.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(path);
+            }
+        });
+    }
+
+    pub fn before_write(path: &Path) {
+        BEFORE_WRITE.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(path);
+            }
+        });
+    }
+}
+
 enum Existing {
     Absent,
     Ours(Vec<u8>),
@@ -260,11 +301,17 @@ fn existing(dirs: &AppDirs, id: &str) -> Existing {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Existing::Absent,
         Err(_) => Existing::Other,
         Ok(m) if !m.file_type().is_file() || m.len() > MAX_DESKTOP_BYTES => Existing::Other,
-        Ok(_) => match read_capped(&path, MAX_DESKTOP_BYTES) {
-            Ok(Some(bytes)) if is_ours(&bytes) => Existing::Ours(bytes),
-            Ok(None) => Existing::Absent,
-            _ => Existing::Other,
-        },
+        // Opened without following a link: one swapped in since the lstat is
+        // an error here, not a file to read.
+        Ok(_) => {
+            #[cfg(test)]
+            hooks::after_look(&path);
+            match read_capped_nofollow(&path, MAX_DESKTOP_BYTES) {
+                Ok(Some(bytes)) if is_ours(&bytes) => Existing::Ours(bytes),
+                Ok(None) => Existing::Absent,
+                _ => Existing::Other,
+            }
+        }
     }
 }
 
@@ -300,16 +347,26 @@ pub fn apply(dirs: &AppDirs, ids: &[&str], name: &str) -> Outcome {
         else {
             return Outcome::NoOriginal;
         };
-        let outcome = match existing(dirs, id) {
+        let state = existing(dirs, id);
+        let outcome = match state {
             Existing::Other => return Outcome::NotOurs,
-            Existing::Ours(have) if have == wanted.as_bytes() => Outcome::Unchanged,
+            Existing::Ours(ref have) if have == wanted.as_bytes() => Outcome::Unchanged,
             _ => {
                 let path = dirs.user.join(id);
                 let made = fs::DirBuilder::new()
                     .recursive(true)
                     .mode(0o755)
                     .create(&dirs.user);
-                if made.is_err() || write_atomic(&path, wanted.as_bytes(), 0o644).is_err() {
+                #[cfg(test)]
+                hooks::before_write(&path);
+                // A name that was absent when looked at is made only if it is
+                // still free; a file of ours is replaced.
+                let written = if matches!(state, Existing::Absent) {
+                    create_atomic_nofollow(&path, wanted.as_bytes(), 0o644)
+                } else {
+                    write_atomic_nofollow(&path, wanted.as_bytes(), 0o644)
+                };
+                if made.is_err() || written.is_err() {
                     return Outcome::Failed;
                 }
                 // The app's age is the system file's, not this write's
@@ -736,5 +793,172 @@ mod tests {
         );
         // And it is recognised as asked for, not swept.
         assert!(!sync(&f.dirs, &names).changed());
+    }
+
+    #[test]
+    fn a_name_cannot_add_a_key_to_the_desktop_file() {
+        // The name goes into a line of a file the whole desktop reads: a
+        // line break, a carriage return or any control character would add
+        // a key (an Exec of its own).
+        for bad in [
+            "x\nExec=/bin/sh",
+            "x\r\nExec=/bin/sh",
+            "x\rExec=/bin/sh",
+            "x\u{85}Exec=/bin/sh",
+            "x\u{2028}Exec=/bin/sh",
+            "x\u{2029}Exec=/bin/sh",
+            "x\0y",
+            "x\u{1b}[31m",
+            "a\u{202e}b",
+            "a\u{200b}b",
+            "  padded ",
+            "two  spaces",
+            "tab\there",
+            "",
+        ] {
+            assert!(render(ORIGINAL, bad).is_none(), "{bad:?}");
+        }
+        assert!(render(ORIGINAL, &"x".repeat(65)).is_none());
+        assert!(render(ORIGINAL, &"x".repeat(64)).is_some());
+        // Whatever is accepted is one line with one Name and no new Exec.
+        let out = render(ORIGINAL, "Fine Name").unwrap();
+        assert_eq!(out.matches("\nExec=").count(), 2); // the entry's and the action's
+        assert_eq!(out.matches("\nName=").count(), 2);
+    }
+
+    #[test]
+    fn apply_with_an_unclean_name_writes_nothing() {
+        let f = fx();
+        let id = "org.example.files.desktop";
+        assert_eq!(
+            apply(&f.dirs, &[id], "x\nExec=/bin/sh"),
+            Outcome::NoOriginal
+        );
+        assert!(!f.dirs.user.join(id).exists());
+    }
+
+    #[test]
+    fn a_link_in_the_way_is_neither_read_nor_written_through() {
+        let f = fx();
+        let id = "org.example.files.desktop";
+        fs::create_dir_all(&f.dirs.user).unwrap();
+        // A link to a file the user cares about, named like the app's file.
+        let precious = f.dirs.user.join("precious.txt");
+        fs::write(&precious, "do not touch").unwrap();
+        symlink(&precious, f.dirs.user.join(id)).unwrap();
+        assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::NotOurs);
+        assert_eq!(remove(&f.dirs, id), Outcome::NotOurs);
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "do not touch");
+        // A dangling link: nothing is created where it points.
+        fs::remove_file(f.dirs.user.join(id)).unwrap();
+        let out = f.dirs.user.join("created-through-the-link");
+        symlink(&out, f.dirs.user.join(id)).unwrap();
+        assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::NotOurs);
+        assert!(!out.exists());
+        // A pipe is not read (it would block) and not replaced.
+        fs::remove_file(f.dirs.user.join(id)).unwrap();
+        let fifo = std::ffi::CString::new(f.dirs.user.join(id).as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::NotOurs);
+        assert_eq!(remove(&f.dirs, id), Outcome::NotOurs);
+    }
+
+    #[test]
+    fn the_marker_alone_in_a_foreign_group_or_file_is_not_ours() {
+        // Markers count in [Desktop Entry] only, and as exactly "true".
+        let other = "[Desktop Entry]\nType=Application\nName=x\nX-Telamon-Renamed=false\n";
+        assert!(!is_ours(other.as_bytes()));
+        let group = "[Desktop Entry]\nType=Application\n[Other]\nX-Telamon-Renamed=true\n";
+        assert!(!is_ours(group.as_bytes()));
+        assert!(!is_ours(&[0xff, 0xfe]));
+        assert!(!is_ours(b""));
+    }
+
+    /// Runs `body` with `hook` installed in `slot`, removing it afterwards.
+    type HookSlot = &'static std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn Fn(&Path)>>>>;
+
+    fn with_hook(slot: HookSlot, hook: impl Fn(&Path) + 'static, body: impl FnOnce()) {
+        slot.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+        body();
+        slot.with(|h| *h.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_link_swapped_in_after_the_look_is_not_read() {
+        // The file is ours when `existing` looks (lstat: a regular file); then
+        // a link to another file of ours-looking content takes its place. The
+        // read must refuse the link (O_NOFOLLOW): NotOurs, nothing written.
+        let f = fx();
+        let id = "org.example.files.desktop";
+        assert_eq!(apply(&f.dirs, &[id], "Mine"), Outcome::Written);
+        let other = f.dirs.user.join("other.txt");
+        fs::write(&other, render(ORIGINAL, "Someone else").unwrap()).unwrap();
+        let (path, target) = (f.dirs.user.join(id), other.clone());
+        with_hook(
+            &hooks::AFTER_LOOK,
+            move |p| {
+                if p == path {
+                    fs::remove_file(p).unwrap();
+                    symlink(&target, p).unwrap();
+                }
+            },
+            || assert_eq!(apply(&f.dirs, &[id], "New name"), Outcome::NotOurs),
+        );
+        assert!(read_link_is_symlink(&f.dirs.user.join(id)));
+        assert!(
+            fs::read_to_string(&other)
+                .unwrap()
+                .contains("Name=Someone else")
+        );
+    }
+
+    fn read_link_is_symlink(p: &Path) -> bool {
+        fs::symlink_metadata(p).unwrap().file_type().is_symlink()
+    }
+
+    #[test]
+    fn a_link_swapped_in_before_the_write_is_not_written_through() {
+        let f = fx();
+        let id = "org.example.files.desktop";
+        assert_eq!(apply(&f.dirs, &[id], "Mine"), Outcome::Written);
+        let precious = f.dirs.user.join("precious.txt");
+        fs::write(&precious, "do not touch").unwrap();
+        let (path, target) = (f.dirs.user.join(id), precious.clone());
+        with_hook(
+            &hooks::BEFORE_WRITE,
+            move |p| {
+                if p == path {
+                    fs::remove_file(p).unwrap();
+                    symlink(&target, p).unwrap();
+                }
+            },
+            || assert_eq!(apply(&f.dirs, &[id], "New name"), Outcome::Failed),
+        );
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "do not touch");
+        assert!(
+            read_link_is_symlink(&f.dirs.user.join(id)),
+            "the link is still there"
+        );
+    }
+
+    #[test]
+    fn a_file_that_appears_before_the_write_is_not_replaced() {
+        // No override yet: `existing` says Absent; before the write the user's
+        // own file appears at the name. RENAME_NOREPLACE keeps it.
+        let f = fx();
+        let id = "org.example.files.desktop";
+        let path = f.dirs.user.join(id);
+        let mine = "[Desktop Entry]\nType=Application\nName=Made meanwhile\nExec=x\n";
+        with_hook(
+            &hooks::BEFORE_WRITE,
+            move |p| {
+                if p == path {
+                    fs::write(p, mine).unwrap();
+                }
+            },
+            || assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::Failed),
+        );
+        assert_eq!(read(&f, id), mine);
     }
 }

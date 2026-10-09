@@ -18,7 +18,8 @@ It learns what you pick in a plain file you can clear
 (`~/.local/state/telamon-launcher/usage.tsv`), and it uses no network unless
 you choose to search the web.
 
-How it is built and why: [docs/DESIGN.md](docs/DESIGN.md). Building:
+How it is built and why: [docs/DESIGN.md](docs/DESIGN.md). What it defends
+against and how that is tested: [docs/SECURITY.md](docs/SECURITY.md). Building:
 [CLAUDE.md](CLAUDE.md), "Commands".
 
 MIT licence.

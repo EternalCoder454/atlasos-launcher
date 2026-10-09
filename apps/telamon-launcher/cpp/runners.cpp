@@ -1,5 +1,7 @@
 #include "runners.h"
 
+#include "validate.h"
+
 #include <KConfigGroup>
 #include <KPluginMetaData>
 #include <KRunner/AbstractRunner>
@@ -9,6 +11,7 @@
 #include <QLoggingCategory>
 #include <QMetaObject>
 #include <QSet>
+#include <QStandardPaths>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -20,6 +23,21 @@ namespace
 {
 constexpr int kMaxMatches = 200;
 constexpr int kMaxQueryLength = 256;
+
+// KRunner keeps what it learns about crashed plugins in
+// $XDG_STATE_HOME/telamon-launcherstaterc. KConfig opens that file as it is,
+// on the GUI thread, when the manager is made: a pipe in its place made the
+// launcher stand in open() for good (measured). A file that is not a plain
+// small one means nothing is remembered: the state goes to /dev/null.
+KSharedConfig::Ptr runnerStateConfig()
+{
+    const QString name = QStringLiteral("telamon-launcherstaterc");
+    const QString path = QStandardPaths::writableLocation(QStandardPaths::GenericStateLocation) + QLatin1Char('/') + name;
+    if (Validate::plainSmallFile(path, 64 * 1024)) {
+        return KSharedConfig::openStateConfig(name);
+    }
+    return KSharedConfig::openConfig(QStringLiteral("/dev/null"), KConfig::SimpleConfig);
+}
 
 // The plugins the launcher draws itself, and the ones another part of the
 // launcher replaces. Both the bare names krunnerrc's keys sometimes use and
@@ -95,7 +113,7 @@ KRunner::RunnerManager *Runners::manager()
         return m_manager;
     }
     const KConfigGroup plugins(KSharedConfig::openConfig(QStringLiteral("krunnerrc")), QStringLiteral("Plugins"));
-    const KConfigGroup state(KSharedConfig::openStateConfig(QStringLiteral("telamon-launcherstaterc")), QStringLiteral("General"));
+    const KConfigGroup state(runnerStateConfig(), QStringLiteral("General"));
     m_manager = new KRunner::RunnerManager(plugins, state, this);
     // What the user typed is not kept.
     m_manager->setHistoryEnabled(false);

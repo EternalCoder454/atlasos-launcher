@@ -8,6 +8,12 @@ use crate::text::{Query, clean_display_max};
 /// Most bytes of query text put into a URL.
 pub const MAX_QUERY_BYTES: usize = 1024;
 
+/// The longest URL [`Engine::search_url`] can make, in characters: the longest
+/// prefix (under 64) and the query, every byte of which may become `%XX`. The
+/// C++ side refuses longer web URLs (`Validate::kMaxWebUrlLength` is this
+/// number; `tests/cpp_guards.rs` keeps them equal).
+pub const MAX_URL_CHARS: usize = 64 + 3 * MAX_QUERY_BYTES;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Engine {
     #[default]
@@ -201,5 +207,42 @@ mod tests {
             }
             let _ = web_row(Engine::from_config(&t), &Query::new(&t, 0));
         }
+    }
+
+    #[test]
+    fn the_longest_search_fits_the_url_bound() {
+        // 1,024 bytes of CJK text: 341 characters of three bytes and one more
+        // byte, every non-ASCII byte becomes "%XX".
+        let cjk = "\u{4e2d}".repeat(400);
+        let engines = [
+            Engine::DuckDuckGo,
+            Engine::Google,
+            Engine::Bing,
+            Engine::Startpage,
+            Engine::Ecosia,
+            Engine::Brave,
+            Engine::Kagi,
+            Engine::Qwant,
+        ];
+        for e in engines {
+            let url = e.search_url(&cjk);
+            assert!(url.len() > 2048, "{}", url.len());
+            assert!(
+                url.len() <= MAX_URL_CHARS,
+                "{} > {MAX_URL_CHARS}",
+                url.len()
+            );
+            assert!(e.prefix().len() < 64);
+            let ascii = e.search_url(&"a".repeat(5000));
+            assert!(ascii.len() <= MAX_URL_CHARS);
+        }
+        // The worst: 1,024 bytes that all encode (three-byte characters give
+        // 1,023, one-byte controls give 1,024).
+        let worst = e_worst(&"\u{1}".repeat(2000));
+        assert!(worst <= MAX_URL_CHARS, "{worst}");
+    }
+
+    fn e_worst(q: &str) -> usize {
+        Engine::Startpage.search_url(q).len()
     }
 }

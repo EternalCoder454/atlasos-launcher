@@ -2,6 +2,7 @@
 
 #include "panel.h"
 #include "runners.h"
+#include "validate.h"
 
 #include <KIO/ApplicationLauncherJob>
 #include <KIO/CommandLauncherJob>
@@ -34,8 +35,6 @@ namespace
 {
 constexpr int kTokenTimeoutMs = 200;
 constexpr int kCallTimeoutMs = 5000;
-constexpr int kMaxIdLength = 255;
-constexpr int kMaxUrlLength = 2048;
 constexpr int kMaxCommandLength = 4096;
 constexpr int kMaxArgs = 256;
 constexpr int kMaxLineLength = 4096;
@@ -67,10 +66,6 @@ void watch(KJob *job, const char *what)
     });
 }
 
-bool validId(const QString &id)
-{
-    return !id.isEmpty() && id.size() <= kMaxIdLength && !id.contains(QChar(0));
-}
 }
 
 Executor::Executor(QObject *backend, Runners *runners, QObject *parent)
@@ -182,7 +177,9 @@ QDBusPendingCallWatcher *Executor::dbusCall(const QDBusMessage &message, bool sy
 
 bool Executor::launchApplication(const QString &desktopId, const QString &actionId)
 {
-    if (!validId(desktopId)) {
+    // Not just any string: KService takes an absolute path as a storage id and
+    // loads whatever desktop file is there (docs/SECURITY.md).
+    if (!Validate::desktopId(desktopId)) {
         return fail("BadArgument");
     }
     const KService::Ptr service = KService::serviceByStorageId(desktopId);
@@ -213,19 +210,7 @@ bool Executor::launchApplication(const QString &desktopId, const QString &action
 
 QUrl Executor::checkedFileUrl(const QString &uri)
 {
-    if (uri.isEmpty() || uri.size() > kMaxUrlLength) {
-        return {};
-    }
-    const QUrl url(uri, QUrl::StrictMode);
-    const bool localHost = url.host().isEmpty() || url.host() == QLatin1String("localhost");
-    if (!url.isValid() || !url.isLocalFile() || !localHost || url.hasQuery() || url.hasFragment() || !url.userInfo().isEmpty() || url.port() != -1) {
-        return {};
-    }
-    const QString path = url.path(QUrl::FullyDecoded);
-    if (!path.startsWith(QLatin1Char('/')) || path.contains(QChar(0))) {
-        return {};
-    }
-    return QUrl::fromLocalFile(path);
+    return Validate::fileUrl(uri);
 }
 
 bool Executor::openLocalFile(const QString &uri)
@@ -247,8 +232,8 @@ bool Executor::openLocalFile(const QString &uri)
 
 bool Executor::openWebUrl(const QString &urlText)
 {
-    const QUrl url(urlText, QUrl::StrictMode);
-    if (urlText.size() > kMaxUrlLength || !url.isValid() || url.scheme() != QLatin1String("https") || url.host().isEmpty()) {
+    const QUrl url = Validate::webUrl(urlText);
+    if (!url.isValid()) {
         return fail("BadArgument");
     }
     return launchWithToken([this, url](const QString &token) {
@@ -263,7 +248,9 @@ bool Executor::openWebUrl(const QString &urlText)
 
 bool Executor::startCommand(const QString &executable, const QStringList &args)
 {
-    if (executable.isEmpty() || executable.size() > kMaxCommandLength || executable.contains(QChar(0)) || args.size() > kMaxArgs) {
+    // An absolute path, as the PATH scan found it (or Telamon Store's): the
+    // job never looks a bare name up on a PATH again.
+    if (!Validate::commandPath(executable, kMaxCommandLength) || args.size() > kMaxArgs) {
         return fail("BadArgument");
     }
     return launchWithToken([this, executable, args](const QString &token) {
@@ -469,7 +456,7 @@ void Executor::launchApp(const QString &desktopId, const QString &action)
 void Executor::openSettings(const QString &link)
 {
     // A deep link is a short id like "bluetooth" or "users/accounts".
-    if (!validId(link) || link.size() > 128) {
+    if (!Validate::settingsLink(link)) {
         settle(fail("BadArgument"));
         return;
     }

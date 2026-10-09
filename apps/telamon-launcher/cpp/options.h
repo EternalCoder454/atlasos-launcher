@@ -6,12 +6,16 @@
 #include <KSharedConfig>
 
 #include <QObject>
+#include <QUrl>
 
 class Options : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool showRecent READ showRecent NOTIFY changed)
     Q_PROPERTY(bool showRecentFiles READ showRecentFiles NOTIFY changed)
+    // Where the Start page keeps its view (Qt's Settings): state.conf, or
+    // /dev/null (nothing remembered) when that is not a plain small file.
+    Q_PROPERTY(QUrl stateConfig READ stateConfig CONSTANT)
 
 public:
     // `backend` is the Rust Backend (called by name).
@@ -19,6 +23,7 @@ public:
 
     bool showRecent() const;
     bool showRecentFiles() const;
+    QUrl stateConfig() const;
 
     // Reads both files and hands the result to the backend.
     void apply();

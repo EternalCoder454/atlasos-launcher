@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(telamon-launcher VERSION 0.3.4 LANGUAGES CXX)
+project(telamon-launcher VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,6 +103,18 @@ target_link_libraries(telamon-launcher-app PRIVATE
     KF6::DBusAddons KF6::WindowSystem KF6::Runner KF6::KIOGui KF6::GlobalAccel
     KF6::ConfigCore KF6::ConfigGui KF6::Service KF6::CoreAddons KF6::KIOCore
     LayerShellQt::Interface)
+
+# The C++ tests (ctest): the checks on strings from outside in cpp/validate.h.
+# Off by default; the RPM's %check turns them on.
+option(TELAMON_LAUNCHER_BUILD_TESTS "Build the C++ tests (run with ctest)" OFF)
+if(TELAMON_LAUNCHER_BUILD_TESTS)
+    enable_testing()
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    qt_add_executable(telamon-launcher-validate-test tests/validate_test.cpp)
+    target_include_directories(telamon-launcher-validate-test PRIVATE cpp)
+    target_link_libraries(telamon-launcher-validate-test PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME validate COMMAND telamon-launcher-validate-test)
+endif()
 
 install(TARGETS telamon-launcher-app RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES data/net.eterneon.telamon.launcher.desktop

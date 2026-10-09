@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Not published to crates.io (cargo-deny then treats path dependencies as local).
+publish = false
 
 [dependencies]
 log.workspace = true
@@ -21,3 +23,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Property tests (tests/props.rs): `cargo test -- props`, with
+# PROPTEST_CASES=20000 for the long run (docs/SECURITY.md).
+proptest = { version = "1", default-features = false, features = ["std"] }

@@ -1,0 +1,86 @@
+name: Security
+
+# The dependencies against the RustSec advisory database, their licences and
+# sources (deny.toml), and the workflows against the rules of docs/SECURITY.md,
+# on every change to them and every week: a new advisory against an unchanged
+# Cargo.lock shows up without a commit.
+on:
+  push:
+    branches: [main, beta]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - '**/Cargo.toml'
+      - .github/workflows/**
+      - scripts/check-workflows.py
+      - scripts/test_check_workflows.py
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - '**/Cargo.toml'
+      - .github/workflows/**
+      - scripts/check-workflows.py
+      - scripts/test_check_workflows.py
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every action is pinned by commit.
+jobs:
+  # Advisories, licences, banned crates and sources (deny.toml). The one
+  # pinned git dependency, atlas-framework, is the only one allowed besides
+  # crates.io.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+
+  # The same advisory database read by cargo-audit: a second opinion on the
+  # lock file, with the result as a check on the commit.
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # scripts/check-workflows.py: pinned actions, minimal token permissions, no
+  # pull_request_target, no untrusted expressions in scripts, no cache a pull
+  # request can fill. Its own tests first, so it cannot rot into accepting all.
+  workflows:
+    name: workflow rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the checker, then run it
+        run: |
+          python3 -I scripts/test_check_workflows.py
+          python3 -I scripts/check-workflows.py
