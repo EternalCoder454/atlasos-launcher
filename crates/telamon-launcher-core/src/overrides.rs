@@ -38,9 +38,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::catalog::valid_desktop_id;
-use crate::fsutil::{read_capped, write_atomic};
+use crate::fsutil::{read_capped, read_capped_nofollow, write_atomic_nofollow};
 use crate::legacy::desktop_id_alias;
-use crate::names::Names;
+use crate::names::{Names, clean_name};
 
 /// `true` in an override the launcher made.
 pub const RENAMED_KEY: &str = "X-Telamon-Renamed";
@@ -137,6 +137,13 @@ fn escape(name: &str) -> String {
 /// an application's desktop file.
 pub fn render(original: &str, name: &str) -> Option<String> {
     if original.contains('\0') || entry_value(original, "Type") != Some("Application") {
+        return None;
+    }
+    // A name that `clean_name` would change (a line break, a control, bidi or
+    // invisible character, too long, empty) is refused here too: this is the
+    // line that is written into a file the whole desktop reads, so it does not
+    // rely on the caller having cleaned it.
+    if name.is_empty() || clean_name(name) != name {
         return None;
     }
     let own = entry_value(original, "Name").unwrap_or("");
@@ -260,7 +267,9 @@ fn existing(dirs: &AppDirs, id: &str) -> Existing {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Existing::Absent,
         Err(_) => Existing::Other,
         Ok(m) if !m.file_type().is_file() || m.len() > MAX_DESKTOP_BYTES => Existing::Other,
-        Ok(_) => match read_capped(&path, MAX_DESKTOP_BYTES) {
+        // Opened without following a link: one swapped in since the lstat is
+        // an error here, not a file to read.
+        Ok(_) => match read_capped_nofollow(&path, MAX_DESKTOP_BYTES) {
             Ok(Some(bytes)) if is_ours(&bytes) => Existing::Ours(bytes),
             Ok(None) => Existing::Absent,
             _ => Existing::Other,
@@ -309,7 +318,8 @@ pub fn apply(dirs: &AppDirs, ids: &[&str], name: &str) -> Outcome {
                     .recursive(true)
                     .mode(0o755)
                     .create(&dirs.user);
-                if made.is_err() || write_atomic(&path, wanted.as_bytes(), 0o644).is_err() {
+                if made.is_err() || write_atomic_nofollow(&path, wanted.as_bytes(), 0o644).is_err()
+                {
                     return Outcome::Failed;
                 }
                 // The app's age is the system file's, not this write's
@@ -736,5 +746,85 @@ mod tests {
         );
         // And it is recognised as asked for, not swept.
         assert!(!sync(&f.dirs, &names).changed());
+    }
+
+    #[test]
+    fn a_name_cannot_add_a_key_to_the_desktop_file() {
+        // The name goes into a line of a file the whole desktop reads: a
+        // line break, a carriage return or any control character would add
+        // a key (an Exec of its own).
+        for bad in [
+            "x\nExec=/bin/sh",
+            "x\r\nExec=/bin/sh",
+            "x\rExec=/bin/sh",
+            "x\u{85}Exec=/bin/sh",
+            "x\u{2028}Exec=/bin/sh",
+            "x\u{2029}Exec=/bin/sh",
+            "x\0y",
+            "x\u{1b}[31m",
+            "a\u{202e}b",
+            "a\u{200b}b",
+            "  padded ",
+            "two  spaces",
+            "tab\there",
+            "",
+        ] {
+            assert!(render(ORIGINAL, bad).is_none(), "{bad:?}");
+        }
+        assert!(render(ORIGINAL, &"x".repeat(65)).is_none());
+        assert!(render(ORIGINAL, &"x".repeat(64)).is_some());
+        // Whatever is accepted is one line with one Name and no new Exec.
+        let out = render(ORIGINAL, "Fine Name").unwrap();
+        assert_eq!(out.matches("\nExec=").count(), 2); // the entry's and the action's
+        assert_eq!(out.matches("\nName=").count(), 2);
+    }
+
+    #[test]
+    fn apply_with_an_unclean_name_writes_nothing() {
+        let f = fx();
+        let id = "org.example.files.desktop";
+        assert_eq!(
+            apply(&f.dirs, &[id], "x\nExec=/bin/sh"),
+            Outcome::NoOriginal
+        );
+        assert!(!f.dirs.user.join(id).exists());
+    }
+
+    #[test]
+    fn a_link_in_the_way_is_neither_read_nor_written_through() {
+        let f = fx();
+        let id = "org.example.files.desktop";
+        fs::create_dir_all(&f.dirs.user).unwrap();
+        // A link to a file the user cares about, named like the app's file.
+        let precious = f.dirs.user.join("precious.txt");
+        fs::write(&precious, "do not touch").unwrap();
+        symlink(&precious, f.dirs.user.join(id)).unwrap();
+        assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::NotOurs);
+        assert_eq!(remove(&f.dirs, id), Outcome::NotOurs);
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "do not touch");
+        // A dangling link: nothing is created where it points.
+        fs::remove_file(f.dirs.user.join(id)).unwrap();
+        let out = f.dirs.user.join("created-through-the-link");
+        symlink(&out, f.dirs.user.join(id)).unwrap();
+        assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::NotOurs);
+        assert!(!out.exists());
+        // A pipe is not read (it would block) and not replaced.
+        fs::remove_file(f.dirs.user.join(id)).unwrap();
+        let fifo = std::ffi::CString::new(f.dirs.user.join(id).as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::NotOurs);
+        assert_eq!(remove(&f.dirs, id), Outcome::NotOurs);
+    }
+
+    #[test]
+    fn the_marker_alone_in_a_foreign_group_or_file_is_not_ours() {
+        // Markers count in [Desktop Entry] only, and as exactly "true".
+        let other = "[Desktop Entry]\nType=Application\nName=x\nX-Telamon-Renamed=false\n";
+        assert!(!is_ours(other.as_bytes()));
+        let group = "[Desktop Entry]\nType=Application\n[Other]\nX-Telamon-Renamed=true\n";
+        assert!(!is_ours(group.as_bytes()));
+        assert!(!is_ours(&[0xff, 0xfe]));
+        assert!(!is_ours(b""));
     }
 }
