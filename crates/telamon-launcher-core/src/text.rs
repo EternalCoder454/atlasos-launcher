@@ -303,7 +303,7 @@ impl Prepared {
     }
 
     /// Exact, prefix or word prefix only (the cheapest check).
-    fn matches_words(&self, query: &Query) -> Option<MatchClass> {
+    pub(crate) fn matches_words(&self, query: &Query) -> Option<MatchClass> {
         self.match_depth(query, Depth::Words)
     }
 

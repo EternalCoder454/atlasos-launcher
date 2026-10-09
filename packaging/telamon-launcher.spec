@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-launcher
-Version:        0.4.0
+Version:        0.4.1
 Release:        1%{?dist}
 Summary:        Telamon Launcher, the Start menu and search of Telamon OS
 License:        MIT
@@ -141,6 +141,12 @@ annocheck %{buildroot}%{_bindir}/telamon-launcher
 %config(noreplace) %{_sysconfdir}/xdg/telamon-launcher/pinned.list
 
 %changelog
+* Fri Oct 09 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.4.1-1
+- Fix: typing an app's name ("telamon g" for Telamon Gates) no longer offers to run it as a command. The
+  "Run" rows for `telamon` and `atlas` are offered only when the word after the name is one of the recipes
+  of /usr/share/telamon/telamon.just (read once, at the scan of PATH), and "Run" rows always rank below an
+  app whose name the whole query matches, whatever the history says.
+
 * Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.4.0-1
 - Security release (docs/SECURITY.md has the threat model, each rule and the test that holds it).
 - Rename App: the desktop file the launcher writes for a name is never written through a link: a link (or a
