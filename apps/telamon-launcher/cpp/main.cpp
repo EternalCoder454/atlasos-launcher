@@ -326,8 +326,7 @@ int main(int argc, char *argv[])
             qCWarning(lcMain) << "the old D-Bus name is taken:" << bus.lastError().name();
         }
     }
-    QObject::connect(adaptor, SIGNAL(importPinsRequested(QStringList)), backend, SLOT(importPins(QStringList)));
-    QObject::connect(adaptor, SIGNAL(clearHistoryRequested()), backend, SLOT(clearHistory()));
+    adaptor->setBackend(backend);
     // ClearHistory replies when the backend has finished (or after 5 s).
     QObject::connect(backend, SIGNAL(historyCleared(bool)), adaptor, SLOT(onHistoryCleared(bool)));
     registerShortcuts(panel.get());

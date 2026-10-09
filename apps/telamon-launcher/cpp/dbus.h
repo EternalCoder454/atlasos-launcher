@@ -31,10 +31,15 @@ public:
 
     bool visible() const;
 
-Q_SIGNALS:
-    // ImportPins and ClearHistory are carried out by the backend.
-    void importPinsRequested(const QStringList &ids);
-    void clearHistoryRequested();
+public:
+    // The backend that carries out ImportPins and ClearHistory (called by
+    // name). Not signals: an adaptor's signals are exported on the bus.
+    void setBackend(QObject *backend);
+
+    // ClearHistory for a call that came in on another adaptor (the legacy
+    // one). A plain method, not a slot: an adaptor's public slots are all
+    // exported as D-Bus methods.
+    void queueClearHistory(const QDBusMessage &call);
 
 public Q_SLOTS:
     void ToggleStart();
@@ -46,10 +51,6 @@ public Q_SLOTS:
     void ImportPins(const QStringList &ids);
     void ClearHistory();
 
-    // ClearHistory for a call that came in on another adaptor (the legacy
-    // one): the reply goes out when the backend has finished.
-    void queueClearHistory(const QDBusMessage &call);
-
 private Q_SLOTS:
     // The backend's answer to clearHistoryRequested. Private, so the
     // adaptor does not export it as a D-Bus method.
@@ -57,9 +58,11 @@ private Q_SLOTS:
 
 private:
     void emitVisibleChanged();
+    void requestClearHistory();
     void replyToClearHistory(bool ok, const QString &error);
 
     Panel *m_panel;
+    QObject *m_backend = nullptr;
     // ClearHistory calls waiting for the backend (delayed replies), and the
     // single-shot that gives them an error after 5 s. It runs only while a
     // call is waiting.

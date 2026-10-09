@@ -161,6 +161,12 @@ pub mod qobject {
         /// The search field's text changed: starts a query.
         #[qinvokable]
         fn search(self: Pin<&mut Backend>, text: &QString);
+        /// Text another process handed to the panel to type in (D-Bus `Show`,
+        /// `--search`), cleaned as a typed query is: no control, bidi or
+        /// invisible characters, at most 256 characters.
+        #[qinvokable]
+        #[cxx_name = "cleanQuery"]
+        fn clean_query(self: &Backend, text: &QString) -> QString;
         /// The panel opened: reload what changed and report the Start page.
         #[qinvokable]
         fn refresh(self: Pin<&mut Backend>);
@@ -871,6 +877,16 @@ impl qobject::Backend {
             e.query(serial, text.clone());
         }
         self.as_mut().search_started(QString::from(text.as_str()));
+    }
+
+    pub fn clean_query(&self, text: &QString) -> QString {
+        // Cut before it is copied, as `search` does.
+        let cut = if text.len() > MAX_SEARCH_UNITS {
+            text.left(MAX_SEARCH_UNITS).to_string()
+        } else {
+            text.to_string()
+        };
+        QString::from(telamon_launcher_core::text::clean_query(&cut).as_str())
     }
 
     pub fn refresh(self: Pin<&mut Self>) {

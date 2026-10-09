@@ -72,6 +72,56 @@ pub fn valid_icon(icon: &str) -> bool {
     valid_icon_name(icon) || valid_icon_path(icon)
 }
 
+/// Largest file an absolute icon path may name, in bytes.
+pub const MAX_ICON_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Whether the absolute icon path `icon` is something the image loaders may be
+/// given: a non-empty regular file (links followed, as icon themes use them)
+/// of at most [`MAX_ICON_FILE_BYTES`] that is not on a pseudo file system. A
+/// pipe would block the loader in its `open` for good, a device or a huge file
+/// would be read into memory, and `/proc` and `/sys` files claim to be regular
+/// files of size 0 or 4,096 and are neither files nor images. Two `stat`s, no
+/// `open`; it can wait on a dead mount, so call it off the GUI thread.
+pub fn icon_file_ok(icon: &str) -> bool {
+    let Ok(meta) = std::fs::metadata(icon) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_ICON_FILE_BYTES {
+        return false;
+    }
+    let Ok(path) = std::ffi::CString::new(icon) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid C string and `sf` a writable statfs buffer.
+    let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut sf) } != 0 {
+        return false;
+    }
+    // procfs, sysfs, cgroup, cgroup2, debugfs, tracefs, securityfs, bpf, pstore
+    const PSEUDO: [u64; 9] = [
+        0x9fa0,
+        0x6265_6572,
+        0x0027_e0eb,
+        0x6367_7270,
+        0x6462_6720,
+        0x7472_6163,
+        0x7363_6673,
+        0xcafe_4a11,
+        0x6165_676c,
+    ];
+    !PSEUDO.contains(&(sf.f_type as u64))
+}
+
+/// `icon`, or `fallback` when it is an absolute path to something
+/// [`icon_file_ok`] refuses. Theme names pass unchanged.
+pub fn vetted_icon(icon: String, fallback: &str) -> String {
+    if icon.starts_with('/') && !icon_file_ok(&icon) {
+        fallback.to_owned()
+    } else {
+        icon
+    }
+}
+
 fn is_sep(c: char) -> bool {
     c.is_whitespace() || matches!(c, '-' | '_' | '.' | '/' | '(' | ')' | ',' | ':' | '+')
 }
@@ -418,14 +468,21 @@ impl fmt::Debug for Query {
     }
 }
 
+/// Typed (or handed-over) query text made safe to show in the search field
+/// and to search for: tabs become spaces, control, bidi and invisible
+/// characters are removed, and at most [`MAX_QUERY_CHARS`] characters are
+/// kept. Spacing is kept.
+pub fn clean_query(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .filter(|c| !is_unsafe_char(*c) || *c == ' ')
+        .take(MAX_QUERY_CHARS)
+        .collect()
+}
+
 impl Query {
     pub fn new(raw: &str, serial: u64) -> Self {
-        let raw: String = raw
-            .chars()
-            .map(|c| if c == '\t' { ' ' } else { c })
-            .filter(|c| !is_unsafe_char(*c) || *c == ' ')
-            .take(MAX_QUERY_CHARS)
-            .collect();
+        let raw = clean_query(raw);
         let words: Vec<String> = fold(&raw).split_whitespace().map(str::to_owned).collect();
         Query {
             folded: words.join(" "),
@@ -689,5 +746,63 @@ mod tests {
         assert_eq!(score_fields(&q, &name, &kw, None), Some(0.65));
         let desc = Prepared::new("browser for the web");
         assert_eq!(score_fields(&q, &name, &[], Some(&desc)), Some(0.3));
+    }
+
+    #[test]
+    fn icon_files_must_be_plain_and_small() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let plain = d.path().join("ok.png");
+        std::fs::write(&plain, b"x").unwrap();
+        let fifo = d.path().join("pipe.png");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let big = d.path().join("big.svg");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_ICON_FILE_BYTES + 1)
+            .unwrap();
+        let exact = d.path().join("exact.svg");
+        std::fs::File::create(&exact)
+            .unwrap()
+            .set_len(MAX_ICON_FILE_BYTES)
+            .unwrap();
+        let link = d.path().join("link.png");
+        std::os::unix::fs::symlink(&plain, &link).unwrap();
+        let zero = d.path().join("zero.svg");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        let p = |f: &std::path::Path| f.to_str().unwrap().to_owned();
+        assert!(icon_file_ok(&p(&plain)));
+        assert!(
+            icon_file_ok(&p(&link)),
+            "links are followed, as icon themes use them"
+        );
+        assert!(icon_file_ok(&p(&exact)));
+        for bad in [&fifo, &big, &zero, &d.path().join("absent.png")] {
+            assert!(!icon_file_ok(&p(bad)), "{bad:?}");
+            assert_eq!(vetted_icon(p(bad), "fallback"), "fallback");
+        }
+        assert!(!icon_file_ok(d.path().to_str().unwrap()), "a folder");
+        assert!(!icon_file_ok("/dev/zero"));
+        // Pseudo files: regular by their mode, but not files.
+        for pseudo in [
+            "/proc/self/mem",
+            "/proc/self/environ",
+            "/proc/self/cmdline",
+            "/proc/cpuinfo",
+            "/sys/kernel/uevent_seqnum",
+            "/sys/devices/system/cpu/online",
+        ] {
+            assert!(!icon_file_ok(pseudo), "{pseudo}");
+        }
+        let empty = d.path().join("empty.png");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(!icon_file_ok(&p(&empty)), "an empty file is no image");
+
+        // Theme names are not touched.
+        assert_eq!(vetted_icon("folder".into(), "fallback"), "folder");
+        assert_eq!(vetted_icon(p(&plain), "fallback"), p(&plain));
     }
 }

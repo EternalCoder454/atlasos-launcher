@@ -102,6 +102,11 @@ LauncherAdaptor::LauncherAdaptor(QObject *parent, Panel *panel)
     });
 }
 
+void LauncherAdaptor::setBackend(QObject *backend)
+{
+    m_backend = backend;
+}
+
 bool LauncherAdaptor::visible() const
 {
     return m_panel->isShown();
@@ -155,13 +160,15 @@ void LauncherAdaptor::SetDockAnchor(const QVariantMap &options)
 void LauncherAdaptor::ImportPins(const QStringList &ids)
 {
     // Validated and resolved by the backend; only the count is bounded here.
-    Q_EMIT importPinsRequested(ids.mid(0, kMaxPins));
+    if (m_backend) {
+        QMetaObject::invokeMethod(m_backend, "importPins", Q_ARG(QStringList, ids.mid(0, kMaxPins)));
+    }
 }
 
 void LauncherAdaptor::ClearHistory()
 {
     if (!calledFromDBus()) {
-        Q_EMIT clearHistoryRequested();
+        requestClearHistory();
         return;
     }
     // The reply goes out when the backend says it is done.
@@ -175,7 +182,14 @@ void LauncherAdaptor::queueClearHistory(const QDBusMessage &call)
     m_clearPending.append(call);
     if (first) {
         m_clearTimeout.start();
-        Q_EMIT clearHistoryRequested();
+        requestClearHistory();
+    }
+}
+
+void LauncherAdaptor::requestClearHistory()
+{
+    if (m_backend) {
+        QMetaObject::invokeMethod(m_backend, "clearHistory");
     }
 }
 
