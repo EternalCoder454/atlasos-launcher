@@ -183,7 +183,7 @@ It is D-Bus-activatable (`SystemdService=telamon-launcher.service`).
 | `Hide()` | Hide if shown |
 | `SetDockAnchor(a{sv})` | The dock button's screen and rect |
 | `ImportPins(as)` | Only when the user has no `pinned.list` yet; ids validated and resolved to installed apps |
-| `ClearHistory()` | Removes `usage.tsv` and the in-memory ranking; returns when done |
+| `ClearHistory()` | Removes `usage.tsv` and the in-memory ranking (the reply does not wait for it: Qt sets an adaptor's `QDBusContext` on the adaptor's parent, so the delayed reply written for it never applies; docs/SECURITY.md) |
 | `Visible` (b, property, with PropertiesChanged) | For the dock button's indicator |
 
 No method runs a result. Results run only from the user's own input in the
@@ -598,6 +598,10 @@ so stale ones are dropped.
 
 ## Trust (attack surface)
 
+`docs/SECURITY.md` is the threat model: who is defended against, the rule for
+each entry point, where it is enforced and the test that keeps it true. This
+section is the list of what is read and how.
+
 The launcher runs as the user with no privilege: no setuid, no polkit action
 of its own, no root helper. Power and session go through logind and
 ksmserver, under their own policies. It holds no secrets, and it does not
@@ -605,8 +609,10 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 
 - **D-Bus methods (any session process):**
   - They can open or hide the panel and type a query, capped at 256
-    characters with control and bidi characters stripped; they never run
-    anything. After a D-Bus `Show` that typed a query, Enter runs nothing
+    characters with control and bidi characters stripped (by the core, in
+    `Backend::cleanQuery`, before the field shows it); they never run
+    anything. The adaptors export exactly these methods and no signal
+    (`scripts/headless-dbus-security.sh` introspects a running launcher). After a D-Bus `Show` that typed a query, Enter runs nothing
     until the user has edited the query (moving the highlight is not
     enough), and a click on a result waits 500 ms after the show, so another
     process cannot line a query up under the user's Enter or click.
@@ -660,7 +666,10 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
     launcher kept for that id.
   - At most 200 matches per batch are taken, so a plugin cannot flood the
     search worker.
-- **Explorer's file results:**
+- **Explorer's file results** (the core's checks exist and are tested; 0.4.0
+  has no D-Bus client for the index yet, and the one to come must also take
+  the reply only from the index daemon's own connection and accept only the
+  documented type):
   - Paths must be absolute and normalised, under 4 KiB, with no NUL.
   - The shown name is the path's own file name, not the hit's `name`, and
     the URI is rebuilt from the path. The icon comes from the path too.
@@ -674,9 +683,23 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   64 characters, nothing left means no name); at most 400 names and 256 KiB.
   They are never logged. The desktop file made for a rename (see "App
   names") is written only under `$XDG_DATA_HOME/applications`, atomically,
-  and only over a file that carries the launcher's marker.
+  never through a link (`write_atomic_nofollow`, `O_NOFOLLOW` reads,
+  `RENAME_NOREPLACE` for a new name), only over a file that carries the
+  launcher's marker, and only with a name that `clean_name` leaves unchanged
+  (checked again in `render`, so no line break or control character can add a
+  key such as `Exec`). The marker counts only in the user's own `applications`
+  folder.
 - **Displayed text:** every `Text`/`Label` that shows app, file, plugin or
   query text sets `textFormat: Text.PlainText`.
+- **Files Qt and KDE open for the launcher** (they open a file as it is, on
+  the asking thread): `state.conf` (the Start page's view) and KRunner's
+  `telamon-launcherstaterc` are handed to them only when absent or plain
+  files of at most 64 KiB (`Validate::plainSmallFile`); a pipe there blocked
+  the GUI thread in `open()`.
+- **What C++ checks again before it starts anything** (`cpp/validate.h`, run by
+  ctest): the desktop file id (`KService` would load an absolute path), the
+  Settings link, the Flatpak id, file and web URLs, and that a command is an
+  absolute path.
 - **Typed commands:**
   - The executable must be on `PATH` and be a regular executable file. The
     `PATH` scan skips relative entries and caps the entries it reads.
@@ -691,7 +714,11 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
   absolute paths (no scheme, no leading `//`, no `..`, at most 4 KiB),
   loaded asynchronously through `QUrl::fromLocalFile`. Anything
   else (`https:` and `file:` URLs included) falls back to a generic icon, so
-  no icon reaches the network.
+  no icon reaches the network. An absolute path must also be a plain file
+  (`text::icon_file_ok`: non-empty, regular, at most 16 MiB, not on
+  `/proc` or `/sys`; a pipe named by `Icon=` blocked the GUI thread in
+  `open()` for good), checked off the GUI thread: for apps in `catalog.cpp`'s
+  pool thread, for late KRunner matches on the search worker.
 - **Logs:** the journal never gets query text, file names or paths of what
   the user ran; only timings, counts and error kinds. Every core type that
   holds such text (queries, results, actions, runner matches, file hits,
@@ -715,7 +742,7 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
 |---|---|
 | The launcher crashes | systemd restarts it (≤ 1 s); D-Bus activation starts it on the next Meta or dock click. A crash during a query records the running KRunner plugins; after 2 crashes in the same plugins within 10 min, that plugin is skipped until the next login and the log names it |
 | A KRunner plugin is slow | The late phase stops waiting after 400 ms; matches that arrive later for the same query are still merged below the top hit, up to 2 s |
-| Explorer's index is missing, slow or erroring | Recent files only; the file row group says "File search is unavailable" once per session |
+| Explorer's index is missing, slow or erroring (0.4.0: there is no client yet, so always) | Recent files only; the file row group says "File search is unavailable" once per session |
 | Settings index missing or invalid | No Settings results; one warning in the log |
 | `usage.tsv`, `pinned.list`, `names.conf` or `launcher.conf` corrupt | Bad lines skipped; the file is rewritten on the next change. A `names.conf` that is too large or unreadable gives no names (the apps show their own) and is left alone |
 | Disk full or file unwritable | Changes kept in memory, one warning; nothing is lost from the old file (atomic writes). The history is written again on the next use, when the panel opens and at shutdown |
