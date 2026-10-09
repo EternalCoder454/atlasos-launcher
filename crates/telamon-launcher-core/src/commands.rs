@@ -23,6 +23,14 @@ pub const MAX_ENTRIES_PER_DIR: usize = 10_000;
 pub const MAX_ENTRIES_TOTAL: usize = 100_000;
 /// Longest command line shown in a row title, in characters.
 const MAX_SHOWN_CHARS: usize = 512;
+/// Telamon OS's command menu, the justfile `telamon` (and `atlas`) runs.
+pub const TELAMON_JUSTFILE: &str = "/usr/share/telamon/telamon.just";
+/// The executables that are that command menu.
+const TELAMON_MENU_NAMES: &[&str] = &["telamon", "atlas"];
+/// Largest justfile read, in bytes.
+const MAX_JUSTFILE_BYTES: u64 = 256 * 1024;
+/// Most recipe names kept.
+const MAX_RECIPES: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Session commands
@@ -331,6 +339,73 @@ pub struct PathCache {
     exes: HashMap<String, String>,
     /// Each scanned folder with its modification time at scan time.
     dirs: Vec<(PathBuf, Option<SystemTime>)>,
+    /// Executables that are a command menu, with the commands it has. The
+    /// first word after the name must be one of these (or a flag), or no
+    /// "Run" row is offered: `telamon g` is the start of an app's name, not
+    /// a command (every Telamon app's name starts with "Telamon").
+    menus: HashMap<String, HashSet<String>>,
+}
+
+/// The names of the public recipes and aliases in a justfile's text, read
+/// like `just --summary` would list them: private recipes (`[private]` or a
+/// leading `_`) are left out. Nothing is run; this is a plain line reading
+/// of the top level, which is all the Telamon justfile uses.
+pub fn justfile_recipes(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut private = false;
+    for line in text.lines() {
+        if out.len() >= MAX_RECIPES {
+            break;
+        }
+        if line.starts_with(char::is_whitespace) || line.is_empty() {
+            continue; // a recipe body (or a blank line)
+        }
+        if line.starts_with('#') {
+            continue; // a doc comment sits between attributes and the recipe
+        }
+        if line.starts_with('[') {
+            if line.contains("private") {
+                private = true;
+            }
+            continue;
+        }
+        let is_private = std::mem::take(&mut private);
+        let line = line.strip_prefix('@').unwrap_or(line);
+        let end = line
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .unwrap_or(line.len());
+        let (word, rest) = line.split_at(end);
+        if word.is_empty() || !word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            continue;
+        }
+        let rest = rest.trim_start();
+        if word == "alias" {
+            let Some(name) = rest
+                .split(":=")
+                .next()
+                .map(str::trim)
+                .filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))
+            else {
+                continue;
+            };
+            if !name.starts_with('_') {
+                out.insert(name.to_owned());
+            }
+            continue;
+        }
+        // `name := value`, `set x`, `import 'f'`, `export x := y`: not recipes.
+        if rest.starts_with(":=") || rest.starts_with('=') {
+            continue;
+        }
+        if matches!(word, "set" | "import" | "mod" | "export" | "unexport") {
+            continue;
+        }
+        if !rest.contains(':') || is_private || word.starts_with('_') {
+            continue;
+        }
+        out.insert(word.to_owned());
+    }
+    out
 }
 
 impl PathCache {
@@ -384,7 +459,48 @@ impl PathCache {
                 cache.exes.insert(name.to_owned(), full.to_owned());
             }
         }
+        cache.load_menus(Path::new(TELAMON_JUSTFILE));
         cache
+    }
+
+    /// Reads Telamon's command menu once, here at scan time, so a typed
+    /// `telamon <word>` is only offered as a command when the word is one. A
+    /// missing or unreadable justfile leaves `telamon` as any other program.
+    fn load_menus(&mut self, justfile: &Path) {
+        if !TELAMON_MENU_NAMES
+            .iter()
+            .any(|n| self.exes.contains_key(*n))
+        {
+            return;
+        }
+        let Ok(Some(bytes)) = crate::fsutil::read_capped(justfile, MAX_JUSTFILE_BYTES) else {
+            return;
+        };
+        let recipes = justfile_recipes(&String::from_utf8_lossy(&bytes));
+        for name in TELAMON_MENU_NAMES {
+            if self.exes.contains_key(*name) {
+                self.menus.insert((*name).to_owned(), recipes.clone());
+            }
+        }
+    }
+
+    /// Makes `name` a command menu with these commands (tests).
+    #[cfg(test)]
+    pub(crate) fn set_menu(&mut self, name: &str, recipes: &[&str]) {
+        self.menus.insert(
+            name.to_owned(),
+            recipes.iter().map(|r| (*r).to_owned()).collect(),
+        );
+    }
+
+    /// A cache of these executables, name to path (tests).
+    #[cfg(test)]
+    pub(crate) fn with_exes(names: &[&str]) -> PathCache {
+        let mut c = PathCache::default();
+        for n in names {
+            c.exes.insert((*n).to_owned(), format!("/usr/bin/{n}"));
+        }
+        c
     }
 
     pub fn len(&self) -> usize {
@@ -437,6 +553,17 @@ impl PathCache {
         let Some(path) = self.exes.get(name) else {
             return Vec::new();
         };
+        if let Some(recipes) = self.menus.get(name) {
+            let ok = match &plan {
+                CommandPlan::Direct { args, .. } => args
+                    .first()
+                    .is_none_or(|a| a.starts_with('-') || recipes.contains(a)),
+                _ => false,
+            };
+            if !ok {
+                return Vec::new();
+            }
+        }
         let p = prior(Kind::Command);
         let shown = shown_line(line);
         let mut out = Vec::with_capacity(2);
@@ -484,6 +611,62 @@ mod tests {
             executable: exe.into(),
             args: args.iter().map(|s| (*s).into()).collect(),
         }
+    }
+
+    const SAMPLE_JUSTFILE: &str = "# comment\nset shell := [\"bash\"]\nname := \"x\"\nalias up := update\n\n[private]\ndefault:\n    @echo hi\n\n# Which OS\ninfo:\n    echo a: b\n\n# Follow a channel\nchannel name:\n    echo {{ name }}\n\n_hidden:\n    true\n\n[private]\n# doc after attribute\nsecret:\n    true\n\n@update force=\"no\":\n    true\n\nbuild target=\"a:b\": dep\n    true\n";
+
+    #[test]
+    fn reads_public_recipe_names() {
+        let r = justfile_recipes(SAMPLE_JUSTFILE);
+        let mut names: Vec<&str> = r.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["build", "channel", "info", "up", "update"]);
+        assert!(justfile_recipes("").is_empty());
+        assert!(justfile_recipes("\u{0}\u{1}garbage ::: \n  x: y").is_empty());
+    }
+
+    #[test]
+    fn a_command_menu_only_offers_its_commands() {
+        let mut c = PathCache::with_exes(&["telamon", "htop"]);
+        c.set_menu("telamon", &["update", "info"]);
+        let ids =
+            |line: &str| -> Vec<String> { c.search(&q(line)).into_iter().map(|r| r.id).collect() };
+        assert_eq!(
+            ids("telamon update"),
+            ["run:telamon update", "term:telamon update"]
+        );
+        assert_eq!(ids("telamon"), ["run:telamon", "term:telamon"]);
+        assert_eq!(ids("telamon --list").len(), 2);
+        assert_eq!(ids("telamon update now").len(), 2);
+        assert!(ids("telamon g").is_empty());
+        assert!(ids("telamon upd").is_empty());
+        assert!(ids("telamon set").is_empty());
+        assert!(ids("telamon info | cat").is_empty());
+        // Other programs are not affected.
+        assert_eq!(ids("htop g").len(), 2);
+    }
+
+    #[test]
+    fn scan_reads_the_command_menu_next_to_the_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for n in ["telamon", "htop"] {
+            let f = bin.join(n);
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let jf = dir.path().join("t.just");
+        std::fs::write(&jf, SAMPLE_JUSTFILE).unwrap();
+        let mut c = PathCache::scan(bin.to_str().unwrap());
+        c.load_menus(&jf);
+        assert!(!c.search(&q("telamon update")).is_empty());
+        assert!(c.search(&q("telamon g")).is_empty());
+        assert!(!c.search(&q("htop g")).is_empty());
+        // No justfile: telamon is any other program.
+        let mut c = PathCache::scan(bin.to_str().unwrap());
+        c.load_menus(&dir.path().join("absent.just"));
+        assert!(!c.search(&q("telamon g")).is_empty());
     }
 
     #[test]

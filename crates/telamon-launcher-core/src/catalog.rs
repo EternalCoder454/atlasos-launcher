@@ -443,6 +443,19 @@ impl Catalog {
         v
     }
 
+    /// Whether the whole query is an app's name (the shown name or the
+    /// original one), whole, as a prefix or as word prefixes ("telamon g" for
+    /// "Telamon Gates"). Such a query is a name being typed, not a command.
+    pub fn name_matches(&self, q: &Query) -> bool {
+        use crate::text::MatchClass::{Exact, Prefix, WordPrefix};
+        !q.is_empty()
+            && self.prep.iter().any(|p| {
+                [&p.name, &p.original]
+                    .iter()
+                    .any(|f| matches!(f.matches_words(q), Some(Exact | Prefix | WordPrefix)))
+            })
+    }
+
     /// Apps (and, for "app word" queries, their desktop actions) matching the
     /// query, unsorted; the caller merges and ranks.
     pub fn search(&self, q: &Query) -> Vec<ResultItem> {

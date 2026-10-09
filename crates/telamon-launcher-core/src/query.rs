@@ -10,7 +10,7 @@ use crate::calc::{self, CalcKind};
 use crate::catalog::Catalog;
 use crate::commands::{PathCache, SessionCommands};
 use crate::recent::RecentFiles;
-use crate::result::{Kind, ResultItem};
+use crate::result::{Action, Kind, ResultItem};
 use crate::settings_index::SettingsIndex;
 use crate::text::Query;
 use crate::usage::UsageStore;
@@ -99,6 +99,34 @@ fn rank(items: &mut Vec<ResultItem>, cx: &Context) {
     items.retain(|it| seen.insert(it.id.clone()));
 }
 
+/// Puts the "Run" rows below the best app: the query is an app's name being
+/// typed ("telamon g" for Telamon Gates), and Enter must open the app even
+/// when the same words once ran as a command (the history's boost counts).
+/// A command is still one keystroke further down, never gone.
+fn demote_runs(items: &mut [ResultItem]) {
+    let Some(best_app) = items
+        .iter()
+        .filter(|it| it.kind == Kind::App)
+        .map(|it| it.score)
+        .max_by(f32::total_cmp)
+    else {
+        return;
+    };
+    let ceiling = best_app - 0.01;
+    let mut moved = false;
+    for it in items.iter_mut() {
+        if matches!(it.action, Action::Run { .. } | Action::RunInTerminal { .. })
+            && it.score > ceiling
+        {
+            it.score = ceiling;
+            moved = true;
+        }
+    }
+    if moved {
+        items.sort_by(ResultItem::rank_cmp);
+    }
+}
+
 /// The instant phase: every core provider the options allow, learned
 /// boosts applied, best first, capped, and the web row last.
 pub fn instant(src: &Sources, cx: &Context) -> Vec<ResultItem> {
@@ -132,6 +160,9 @@ pub fn instant(src: &Sources, cx: &Context) -> Vec<ResultItem> {
         out.extend(src.recent.search(q, &src.home));
     }
     rank(&mut out, cx);
+    if opts.apps && src.catalog.name_matches(q) {
+        demote_runs(&mut out);
+    }
     let web = opts.web.and_then(|engine| web_row(engine, q));
     out.truncate(MAX_RESULTS - usize::from(web.is_some()));
     out.extend(web);
@@ -426,6 +457,92 @@ mod tests {
 
         // Nothing for an empty query, not even the web row.
         assert!(run(&src, &usage, &opts, "   ").is_empty());
+    }
+
+    /// Telamon apps plus a `telamon` command menu and `htop` on PATH.
+    fn telamon_sources() -> Sources {
+        let mut path = PathCache::with_exes(&["telamon", "atlas", "htop"]);
+        path.set_menu("telamon", &["info", "update", "channel"]);
+        path.set_menu("atlas", &["info", "update", "channel"]);
+        Sources {
+            catalog: Arc::new(Catalog::new(vec![
+                app("net.eterneon.telamon.gates.desktop", "Telamon Gates"),
+                app("net.eterneon.telamon.settings.desktop", "Telamon Settings"),
+                app("net.eterneon.telamon.store.desktop", "Telamon Store"),
+            ])),
+            path: Arc::new(path),
+            ..sources()
+        }
+    }
+
+    fn is_run(it: &ResultItem) -> bool {
+        matches!(it.action, Action::Run { .. } | Action::RunInTerminal { .. })
+    }
+
+    #[test]
+    fn typing_an_app_name_ranks_the_app_above_run_rows() {
+        let src = telamon_sources();
+        let usage = UsageStore::default();
+        let opts = SearchOptions::default();
+
+        let r = run(&src, &usage, &opts, "telamon g");
+        assert_eq!(r[0].id, "app:net.eterneon.telamon.gates.desktop");
+        assert!(!r.iter().any(is_run), "{:?}", ids(&r));
+
+        let r = run(&src, &usage, &opts, "telamon set");
+        assert_eq!(r[0].id, "app:net.eterneon.telamon.settings.desktop");
+        assert!(!r.iter().any(is_run));
+
+        let r = run(&src, &usage, &opts, "atlas g");
+        assert!(!r.iter().any(is_run));
+    }
+
+    #[test]
+    fn a_real_command_still_gets_run_rows() {
+        let src = telamon_sources();
+        let usage = UsageStore::default();
+        let opts = SearchOptions::default();
+
+        let r = run(&src, &usage, &opts, "telamon update");
+        assert!(ids(&r).contains(&"run:telamon update"));
+        assert!(ids(&r).contains(&"term:telamon update"));
+        let r = run(&src, &usage, &opts, "telamon");
+        assert!(ids(&r).contains(&"run:telamon"));
+        let r = run(&src, &usage, &opts, "htop");
+        assert!(ids(&r).contains(&"run:htop"));
+        assert!(ids(&r).contains(&"term:htop"));
+        let r = run(&src, &usage, &opts, "htop -d 5");
+        assert!(ids(&r).contains(&"run:htop -d 5"));
+    }
+
+    #[test]
+    fn history_cannot_lift_a_run_row_over_the_app_being_typed() {
+        // A PATH program without a menu (so a Run row exists), a name that
+        // is also an app's name, and a history that once ran the line.
+        let mut src = telamon_sources();
+        src.path = Arc::new(PathCache::with_exes(&["telamon"]));
+        let mut usage = UsageStore::default();
+        let opts = SearchOptions::default();
+        for _ in 0..20 {
+            usage.record(&q("telamon g"), "term:telamon g", NOW - 60);
+            usage.record(&q("telamon g"), "run:telamon g", NOW - 60);
+        }
+        let r = run(&src, &usage, &opts, "telamon g");
+        assert_eq!(r[0].id, "app:net.eterneon.telamon.gates.desktop");
+        // Still offered, one step further down.
+        assert!(ids(&r).contains(&"run:telamon g"));
+        assert!(ids(&r).contains(&"term:telamon g"));
+    }
+
+    #[test]
+    fn a_command_that_is_not_an_app_name_is_not_demoted() {
+        let mut src = telamon_sources();
+        src.path = Arc::new(PathCache::with_exes(&["htop", "telamon"]));
+        let usage = UsageStore::default();
+        let opts = SearchOptions::default();
+        // No app is called "htop": the Run row stays on top of the web row.
+        let r = run(&src, &usage, &opts, "htop");
+        assert_eq!(r[0].id, "run:htop");
     }
 
     #[test]

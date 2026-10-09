@@ -425,6 +425,13 @@ closes.
   shell is involved: a line with shell syntax (`|`, `;`, `&`, `$`, `>`,
   backquotes) offers only "Run in Terminal", which hands the user's own text
   to `KTerminalLauncherJob`.
+- A name being typed is not a command. For `telamon` and `atlas` (Telamon's
+  command menu) the word after the name must be a recipe of
+  `/usr/share/telamon/telamon.just` (read once, at the `PATH` scan, as text:
+  nothing is run) or a flag, else no Run row is offered. And when the whole
+  query is the start of an app's name (prefix or word prefixes, so
+  `telamon g` for Telamon Gates), the Run rows rank below the best app, the
+  history's boost included.
 
 **Web:** "Search the web for ‘text’" opens the chosen engine's https URL with
 the query percent-encoded, through `KIO::OpenUrlJob` in the default browser.
