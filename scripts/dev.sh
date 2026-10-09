@@ -37,7 +37,11 @@ tty=()
 # containers and tools out of them. Labels are off for the container.
 # --init: a real PID 1, so timeout, dbus-run-session and the headless
 # runs signal and reap their children as they do outside a container.
-exec podman run --rm --init --security-opt label=disable "${tty[@]}" \
+# --ulimit core=0: a crash in the container must not leave a core dump (it can
+# hold what was typed into a test run); no-new-privileges: nothing in it gains
+# privilege through a setuid file.
+exec podman run --rm --init --ulimit core=0 --security-opt no-new-privileges \
+    --security-opt label=disable "${tty[@]}" \
     -v "$repo":/src -w /src \
     -v "$work":/work \
     -v telamon-launcher-cargo:/root/.cargo/registry \

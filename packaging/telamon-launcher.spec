@@ -5,7 +5,7 @@
 %global debug_package %{nil}
 
 Name:           telamon-launcher
-Version:        0.3.4
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Telamon Launcher, the Start menu and search of Telamon OS
 License:        MIT
@@ -27,6 +27,8 @@ BuildRequires:  corrosion
 # Cargo fetches the atlas-framework crates from GitHub.
 BuildRequires:  git-core
 BuildRequires:  desktop-file-utils
+# annocheck confirms scripts/check-hardening.sh on the finished program (%%check)
+BuildRequires:  annobin-annocheck
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  cmake(Qt6Core)
 BuildRequires:  cmake(Qt6DBus)
@@ -85,7 +87,8 @@ export CXXFLAGS="%{build_cxxflags} -ffile-prefix-map=$PWD=."
 export CARGO_PROFILE_RELEASE_STRIP=none
 # (%%cmake honours _vpath_srcdir, not __cmake_source_dir)
 %global _vpath_srcdir apps/telamon-launcher
-%cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
+# TELAMON_LAUNCHER_BUILD_TESTS: the C++ checks of cpp/validate.h, run in %%check.
+%cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DTELAMON_LAUNCHER_BUILD_TESTS=ON
 %cmake_build
 
 %install
@@ -98,6 +101,9 @@ ln -s telamon-launcher %{buildroot}%{_bindir}/atlas-launcher
 ln -s telamon-launcher.service %{buildroot}%{_userunitdir}/atlas-launcher.service
 
 %check
+# The C++ checks on strings from outside (desktop file ids, file URIs, web URLs,
+# command paths; docs/SECURITY.md, "Starting programs").
+%ctest
 # No path into the build tree (checked as well as set: see %%build).
 rc=0
 grep -qF "%{_builddir}" %{buildroot}%{_bindir}/telamon-launcher || rc=$?
@@ -109,6 +115,14 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.telamon.
 desktop-file-validate %{buildroot}%{_datadir}/applications/net.eterneon.atlas.launcher.desktop
 test "$(readlink %{buildroot}%{_bindir}/atlas-launcher)" = telamon-launcher
 test "$(readlink %{buildroot}%{_userunitdir}/atlas-launcher.service)" = telamon-launcher.service
+# The program carries the hardening Fedora's build flags give it (docs/SECURITY.md,
+# "Build hardening"): a position-independent executable with full RELRO and
+# BIND_NOW, no executable stack, no RPATH, stack protectors; readelf says so, not
+# the flags we meant. It holds no development-only switch.
+scripts/check-hardening.sh --cxx %{buildroot}%{_bindir}/telamon-launcher
+# annocheck agrees (PIE, BIND_NOW, RELRO, non-executable stack, CET marks, no
+# writable GOT, stack protection, ...): it fails the build as well.
+annocheck %{buildroot}%{_bindir}/telamon-launcher
 
 %files
 %license LICENSE
@@ -127,6 +141,34 @@ test "$(readlink %{buildroot}%{_userunitdir}/atlas-launcher.service)" = telamon-
 %config(noreplace) %{_sysconfdir}/xdg/telamon-launcher/pinned.list
 
 %changelog
+* Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.4.0-1
+- Security release (docs/SECURITY.md has the threat model, each rule and the test that holds it).
+- Rename App: the desktop file the launcher writes for a name is never written through a link: a link (or a
+  pipe, or a folder) at its name is refused and a name that appeared since it looked is not replaced; the
+  file it reads back to see whether it is its own is opened without following a link. The name written into
+  the file is checked again where it is written (no line break, control, bidi or invisible character, at most
+  64 characters), so no caller can add a key such as Exec to a desktop file the whole desktop reads. The
+  launcher's own marker counts only in the desktop files of your own applications folder.
+- The D-Bus interface is exactly the documented one: an internal method (queueClearHistory) and two internal
+  signals (importPinsRequested, clearHistoryRequested) were exported on the bus by mistake and are not.
+- Text handed to the panel by another process (D-Bus Show, --search) is cleaned like typed text, so the search
+  field shows what is searched for (control, bidi and invisible characters out, at most 256 characters).
+- Starting things: the desktop file id of an app to start must be a plain id (KService takes an absolute path
+  as an id and would load any desktop file there), a typed command runs only by the absolute path the PATH scan
+  found, web addresses allow no user or port, file addresses no "." or ".." segment, and the Flatpak id check no
+  longer lets a trailing line break through.
+- Fix: a pipe could hang the launcher for good. An app whose Icon= names a pipe stopped the launcher when
+  the Start page drew it; a pipe in the place of ~/.config/telamon-launcher/state.conf, or of KRunner's state
+  file (~/.local/state/telamon-launcherstaterc), stopped it at start. Icon paths must now be plain files (not a
+  pipe, a device, an empty or huge file, or /proc and /sys), and those two files are opened only if they are
+  plain small files.
+- Smaller: a mime type starting with "-" or "." no longer makes an icon name starting with it, the folder shown
+  under a command and the account's real name are cleaned like other shown text.
+- Tests: property tests (cargo test -- props) for the cleaners, the desktop-entry catalogue, the rename writer,
+  the file parsers, the calculator, the web URL and typed commands; C++ tests (ctest) for the checks above;
+  a headless probe of the D-Bus surface; a lint of the QML that insists on plain text. Build hardening is
+  checked on the finished program by the package build; CI runs cargo-deny and cargo-audit weekly.
+
 * Thu Oct 08 2026 EternalHell <77252745+EternalCoder454@users.noreply.github.com> - 0.3.4-1
 - Fix: the app used about 8% of a core with its window idle. The icon layers added in the last release
   were redrawn on every frame with Qt Quick's software renderer; a layer is live now only for a moment

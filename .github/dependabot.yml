@@ -1,0 +1,25 @@
+# Pull requests that move the pinned GitHub Actions (each by commit sha, with
+# its version in a comment) and the crates' dependencies, one weekly PR each.
+# docs/SECURITY.md, "Build hardening and supply chain". The atlas-framework
+# pin (a git tag in Cargo.toml) is moved by hand: CLAUDE.md, "Moving the
+# atlas-framework pin".
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: "ci"
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      crates:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
