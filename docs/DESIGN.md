@@ -712,13 +712,16 @@ record what could carry one (see `usage.tsv` below). What it reads, and how:
     full line as its tooltip and accessible description.
 - **Icons:** theme names matching `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, or
   absolute paths (no scheme, no leading `//`, no `..`, at most 4 KiB),
-  loaded asynchronously through `QUrl::fromLocalFile`. Anything
+  loaded through `QUrl::fromLocalFile`. Anything
   else (`https:` and `file:` URLs included) falls back to a generic icon, so
   no icon reaches the network. An absolute path must also be a plain file
   (`text::icon_file_ok`: non-empty, regular, at most 16 MiB, not on
   `/proc` or `/sys`; a pipe named by `Icon=` blocked the GUI thread in
-  `open()` for good), checked off the GUI thread: for apps in `catalog.cpp`'s
-  pool thread, for late KRunner matches on the search worker.
+  `open()` for good), checked off the GUI thread, and drawn by an
+  asynchronous `Image` (`LauncherItemIcon.qml`; a `Kirigami.Icon` reads its
+  file on the GUI thread and gets theme names only), so a file swapped for a
+  pipe after the check cannot block the panel. The check runs for apps on
+  `catalog.cpp`'s pool thread, for late KRunner matches on the search worker.
 - **Logs:** the journal never gets query text, file names or paths of what
   the user ran; only timings, counts and error kinds. Every core type that
   holds such text (queries, results, actions, runner matches, file hits,

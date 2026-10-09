@@ -45,21 +45,31 @@ const PLAIN_BY_DEFAULT: &[&str] = &["TelamonLabel", "TelamonTextArea", "TelamonT
 /// Files that make an image-like item (an `Image`, or a Telamon.Ui control that
 /// loads one: `TelamonAvatar`, `TelamonChoiceCard`, `TelamonScreenshotCarousel`),
 /// and the `source` it must have, with why that source is safe.
-const IMAGES: &[(&str, &[&str], &str)] = &[(
-    "apps/telamon-launcher/qml/LauncherAccountButton.qml",
-    &[
-        "account.actions.userIcon.length > 0 ? \"file://\" + account.actions.userIcon.split(\"/\").map(encodeURIComponent).join(\"/\") : \"\"",
-    ],
-    "the user's picture is a path AccountsService stores, vetted in C++ (trustedIconFile: a regular \
+const IMAGES: &[(&str, &[&str], &str)] = &[
+    (
+        "apps/telamon-launcher/qml/LauncherItemIcon.qml",
+        &["root.fromFile ? root.fileUrl(root.name) : \"\""],
+        "an absolute icon path, checked to be a plain file when the catalogue is built, is \
+         loaded by an `asynchronous: true` Image, so a file swapped for a pipe afterwards \
+         stalls the image loader thread and not the GUI thread (every Image must be \
+         asynchronous: checked below)",
+    ),
+    (
+        "apps/telamon-launcher/qml/LauncherAccountButton.qml",
+        &[
+            "account.actions.userIcon.length > 0 ? \"file://\" + account.actions.userIcon.split(\"/\").map(encodeURIComponent).join(\"/\") : \"\"",
+        ],
+        "the user's picture is a path AccountsService stores, vetted in C++ (trustedIconFile: a regular \
      file of the user or root, of sane size and dimensions) before it is a property of Actions",
-)];
+    ),
+];
 
 /// Files that make a `Kirigami.Icon` (a theme name or a file path) and the
 /// `source` it must have.
 const ICONS: &[(&str, &str)] = &[
     (
         "apps/telamon-launcher/qml/LauncherItemIcon.qml",
-        "name.startsWith(\"/\") ? fileUrl(name) : (name.length > 0 ? name : \"application-x-executable\")",
+        "root.fromFile ? \"application-x-executable\" : (root.name.length > 0 ? root.name : \"application-x-executable\")",
     ),
     (
         // The dock button's own icon: `Plasmoid.icon` is the constant "atlasos".
@@ -584,6 +594,16 @@ fn image_findings(
                     .into_iter()
                     .map(|s| norm(&s))
                     .collect();
+                // Pictures are read off the GUI thread: a file swapped for a
+                // pipe after the checks must stall a loader thread at worst.
+                if matches!(e.base(), "Image" | "AnimatedImage" | "BorderImage")
+                    && !own_values(src, &e, "asynchronous").contains(&"true")
+                {
+                    out.push(format!(
+                        "{}:{}: `{}` without `asynchronous: true` is read by the GUI thread",
+                        src.path, e.line, e.name
+                    ));
+                }
                 match images.iter().find(|(f, _, _)| *f == src.path) {
                     None => out.push(format!(
                         "{}:{}: `{}` here: IMAGES lists the files that may make one, with the source it has",
@@ -694,14 +714,38 @@ fn images_and_icons_come_from_checked_sources() {
     for (file, allowed, why) in IMAGES {
         let src = all.iter().find(|s| s.path == *file).expect(file);
         assert!(
-            elements(src).iter().any(|e| e.base() == "TelamonAvatar"),
-            "{file} no longer makes an avatar"
+            elements(src)
+                .iter()
+                .any(|e| matches!(e.base(), "Image" | "TelamonAvatar")),
+            "{file} no longer makes an image"
         );
         assert!(why.len() > 20 && !allowed.is_empty());
     }
     for (file, _) in ICONS {
         assert!(all.iter().any(|s| s.path == *file), "{file}");
     }
+}
+
+#[test]
+fn a_kirigami_icon_is_never_given_a_file() {
+    // Kirigami.Icon reads its file on the GUI thread; only theme names go to it.
+    let all = sources();
+    let icon = all
+        .iter()
+        .find(|s| s.path.ends_with("qml/LauncherItemIcon.qml"))
+        .unwrap();
+    for e in elements(icon).iter().filter(|e| e.base() == "Icon") {
+        for v in own_raw(icon, e, "source") {
+            assert!(!v.contains("fileUrl") && !v.contains("file://"), "{v}");
+        }
+    }
+    // And an Image there is asynchronous.
+    let images: Vec<_> = elements(icon)
+        .into_iter()
+        .filter(|e| e.base() == "Image")
+        .collect();
+    assert_eq!(images.len(), 1);
+    assert_eq!(own_values(icon, &images[0], "asynchronous"), vec!["true"]);
 }
 
 #[test]
@@ -819,9 +863,17 @@ fn checker_code_and_network() {
 fn checker_images() {
     let ok = snippet(
         "f.qml",
-        "Item { Image { source: a.b } Kirigami.Icon { source: \"folder\" } TelamonAvatar { source: a.b } }",
+        "Item { Image { asynchronous: true; source: a.b } Kirigami.Icon { source: \"folder\" } TelamonAvatar { source: a.b } }",
     );
     assert!(image_findings(&ok, &[("f.qml", &["a.b"], "why")], &[]).is_empty());
+    // An Image that is not asynchronous is refused even where it is listed.
+    let sync = snippet("f.qml", "Item { Image { source: a.b } }");
+    assert!(!image_findings(&sync, &[("f.qml", &["a.b"], "why")], &[]).is_empty());
+    let asy = snippet(
+        "f.qml",
+        "Item { Image { asynchronous: true; source: a.b } }",
+    );
+    assert!(image_findings(&asy, &[("f.qml", &["a.b"], "why")], &[]).is_empty());
     // An image where none is listed, or with another source.
     assert!(!image_findings(&ok, &[], &[]).is_empty());
     assert!(!image_findings(&ok, &[("f.qml", &["c.d"], "why")], &[]).is_empty());

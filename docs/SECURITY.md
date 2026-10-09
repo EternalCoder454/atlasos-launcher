@@ -152,9 +152,9 @@ through KDE's launch jobs with an argument vector:
 | What | How | Checked before |
 |---|---|---|
 | An app, or one of its desktop actions | `KIO::ApplicationLauncherJob` (service, or service action) | The id is `[A-Za-z0-9._-]{1,255}` ending in `.desktop` (`Validate::desktopId`). The action is found by name among the service's own actions. |
-| A file or folder | `KIO::OpenUrlJob`, `setRunExecutables(false)` | `Validate::fileUrl`: a `file:` URL, no host (or `localhost`), no query, fragment, user, port, NUL, `.` or `..` segment, at most 2,048 bytes |
-| A web search | `KIO::OpenUrlJob`, `setRunExecutables(false)` | `Validate::webUrl`: `https`, a host, no user, no port, no control character |
-| A typed command | `KIO::CommandLauncherJob(executable, args)` | `Validate::commandPath`: an absolute path (the one the `PATH` scan found) and at most 256 arguments |
+| A file or folder | `KIO::OpenUrlJob`, `setRunExecutables(false)` | `Validate::fileUrl`: a `file:` URL, no host (or `localhost`), no query, fragment, user, port, NUL, `.` or `..` segment, at most 12,296 UTF-16 units (`kMaxFileUrlLength`: the longest URI the core builds, a 4,096-byte path with every byte as `%XX`, plus `file://`) |
+| A web search | `KIO::OpenUrlJob`, `setRunExecutables(false)` | `Validate::webUrl`: `https`, a host, no user, no port, no control character, at most 3,136 UTF-16 units (`kMaxWebUrlLength`: a 64-character prefix and the core's 1,024 query bytes, each `%XX`; a full CJK search is about 3,100 characters) |
+| A typed command | `KIO::CommandLauncherJob(executable, args)` | `Validate::commandPath`: a path with a leading `/` (not `:/x`, a Qt resource, which `QDir::isAbsolutePath` accepts; not `//`), no `..` segment, the one the `PATH` scan found (it skips entries the check would refuse), and at most 256 arguments |
 | "Run in Terminal" | `KTerminalLauncherJob(line)` | A non-empty line of at most 4,096 characters. **The one place a line goes to a shell**, because that is what the row says |
 | A Settings page | D-Bus `ActivateAction("open", [link])` | `Validate::settingsLink`: `[a-z0-9][a-z0-9-]*(/...)`, at most 128 bytes |
 | Uninstall (Flatpak) | `/usr/bin/telamon-store --remove <id>` (then `/usr/local/bin`) | `Validate::flatpakId`: reverse-DNS, no leading dash (`\A...\z`, so a trailing line break is refused) |
@@ -213,7 +213,7 @@ field (`sanitize`) and drops what fails:
 | Name, generic name, comment | `clean_display`: control, bidi, zero-width, variation-selector, tag, filler, Braille-blank and object-replacement characters become spaces, runs of white space one space, ends trimmed, at most 512 characters, cut with "…"; an empty name falls back to the id |
 | Keywords, categories | At most 64 each, each cleaned and cut at 64 characters |
 | Executable name | The first word of `Exec` past `env` and `VAR=value`, its file name, cleaned, at most 255 characters; used only for matching, never launched |
-| Icon | A theme name `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, or an absolute path (no scheme, no `//`, no `..`, no control character, at most 4 KiB); else a generic icon. In C++ an absolute path is kept only if the core says it is a **plain file** (`text::icon_file_ok` through `telamon_launcher_icon_ok`: non-empty, regular, at most 16 MiB, links followed as icon themes use them, not on `/proc`, `/sys`, cgroup, debugfs...; two `stat`s on a pool thread, no `open`). Measured: with `Icon=` naming a pipe the image loader stood in `open()` on the GUI thread (`wait_for_partner`) when the Start page drew the app, and the launcher never answered again |
+| Icon | A theme name `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`, or an absolute path (no scheme, no `//`, no `..`, no control character, at most 4 KiB); else a generic icon. In C++ an absolute path is kept only if the core says it is a **plain file** (`text::icon_file_ok` through `telamon_launcher_icon_ok`: non-empty, regular, at most 16 MiB, links followed as icon themes use them, not on `/proc`, `/sys`, cgroup, debugfs...; two `stat`s on a pool thread, no `open`). Measured: with `Icon=` naming a pipe the image loader stood in `open()` on the GUI thread (`wait_for_partner`) when the Start page drew the app, and the launcher never answered again. That check is made once, when the catalogue is built, so a file swapped for a pipe afterwards would pass it: absolute paths are therefore drawn by an `asynchronous: true` `Image` (`LauncherItemIcon.qml`), whose `open()` runs on the image loader thread; a `Kirigami.Icon` (which reads its file on the GUI thread) is only ever given a theme name. A swapped-in pipe then stalls the loading of other file icons (they keep the generic icon), not the panel |
 | Actions | At most 32; the id `[A-Za-z0-9._-]{1,64}`; the name cleaned and non-empty |
 | `X-Flatpak` | `valid_flatpak_id`, else none (Uninstall is not offered) |
 
@@ -262,12 +262,12 @@ can write to, so every step assumes the entry may have been tampered with:
 | **Path traversal in the id** | The id must be `valid_desktop_id` (`[A-Za-z0-9._-]`, `.desktop`, 255 bytes) in `apply`, `remove`, `sync` and `find_original`; a menu-folder form (`kde-foo.desktop` as `kde/foo.desktop`) never uses an empty, `.` or `..` folder | `a_dash_never_makes_a_path_out_of_the_folder`, `props::the_override_writer_stays_in_its_folder`, `corpus::the_override_writer_and_the_worst_ids` |
 | **Writing outside the folder** | The only path written is `<applications>/<id>`; the property test applies random ids and names and requires every file outside the user folder to be byte-identical afterwards, and every new file to have a valid id | `props::the_override_writer_stays_in_its_folder`, `props::sync_keeps_to_its_folder` |
 | **A link at the target** | `existing` looks with `lstat`, reads with `O_NOFOLLOW` (`read_capped_nofollow`) and the write is `write_atomic_nofollow`: the final name is never followed, the target must be absent or a regular file, and the new file replaces a name by `rename`, never writes through a link. A link, a pipe or a folder at the name is `NotOurs`: not read, not replaced, not removed | `a_file_that_is_not_ours_is_never_touched`, `a_link_in_the_way_is_neither_read_nor_written_through`, `fsutil::nofollow_*` |
-| **A race: a link, or a file, appears between the look and the write** | A name that was absent is taken with `renameat2(RENAME_NOREPLACE)`: a file that appeared in between is not clobbered. A swap of the file *of ours* for another between the look and the `rename` still replaces it (that is a file the same user made); the rename replaces the name and never follows a link | `fsutil::a_name_that_appeared_is_not_clobbered_by_a_new_file` (the primitive; the race itself is reasoned, not tested) |
+| **A race: a link, or a file, appears between the look and the write** | A name that `apply` found absent is made by `create_atomic_nofollow`: it fails (`AlreadyExists`) if anything is at the name when it looks again, and the rename uses `renameat2(RENAME_NOREPLACE)`, so what appears even later is not clobbered. **On a file system without `renameat2`/`RENAME_NOREPLACE` (`EINVAL`, `ENOSYS`, `ENOTSUP`) the rename falls back to a plain `rename`**: the second look still applies, the last instant does not. A swap of the file *of ours* for another between the look and the `rename` still replaces it (a file the same user made); the rename replaces the name and never follows a link | `overrides::a_link_swapped_in_after_the_look_is_not_read`, `a_link_swapped_in_before_the_write_is_not_written_through`, `a_file_that_appears_before_the_write_is_not_replaced` (test hooks in `existing` and `apply` put the thing in the way at the moment a race would), `fsutil::a_file_that_appears_before_the_rename_is_kept_by_the_writers` (a hook before the rename), `create_only_never_replaces_anything` |
 | **A collision with a system id** | That is the point: a user file of the same id replaces the system one for the whole desktop, exactly as KDE's menu editor does. It copies the system file the desktop would have used (the first folder that has the id, also as a menu subfolder; if that file is too large, not text or not an application, there is none and a lower folder's file is not used) | `an_unusable_first_file_is_not_replaced_by_a_lower_one`, `the_first_system_dir_wins_as_in_the_desktop` |
 | **Marker spoofing** | Only a file with `X-Telamon-Renamed=true` in `[Desktop Entry]` is ever changed or deleted (a user's own file, or another tool's, never is). The marker is not authenticated: any process of the user can write a file with it, and the launcher will then overwrite or remove *that file*, which that process could do itself. The marker alone in another group, as `false`, or in a non-UTF-8 file is not the marker | `the_marker_alone_in_a_foreign_group_or_file_is_not_ours` |
 | **Injection through the name** | `clean_name` (control, bidi, invisible characters out; tabs and line breaks are spaces; at most 64 characters) runs where the name enters, **and `render` refuses any name that `clean_name` would change**, so no caller can put a line break, a carriage return, NEL, U+2028/2029, an escape, a NUL or bidi controls into the `Name=` line and add a key such as `Exec` to a file the desktop reads. A backslash is doubled (the desktop-file escape). The original name copied into `X-Telamon-Original-Name` has its line breaks replaced | `a_name_cannot_add_a_key_to_the_desktop_file`, `apply_with_an_unclean_name_writes_nothing`, `props::render_never_adds_a_key` (every output line is a line of the original or one of three of ours) |
 | **Modes** | New file `0644` (it is a copy of a world-readable system file and holds nothing secret); an existing one keeps its permission bits, never setuid, setgid or sticky; the temp file is created `O_CREAT|O_EXCL|O_NOFOLLOW` in the same folder through a directory descriptor and `fchmod`-ed before the rename | `fsutil::nofollow_write_creates_and_replaces_regular_files`, `apply_writes_updates_and_removes` |
-| **Atomic** | temp file, `fsync`, `renameat`, `fsync` of the folder; a crash leaves the old file or the new one; stale temp files (`.<name>.tmp-<pid>-<n>`, regular files, older than a day) are swept at start | `fsutil` tests, `stale_temp_files_are_swept` |
+| **Atomic** | temp file, `fsync`, `renameat`, `fsync` of the folder; a crash leaves the old file or the new one. The stale-temp sweep at start covers `usage.tsv`, `pinned.list` and `names.conf` only: a `.<id>.desktop.tmp-<pid>-<n>` left in `applications` by a crash between the temp file and the rename is **not** swept (it is a hidden file that does not end in `.desktop`, so the desktop never reads it) | `fsutil` tests, `stale_temp_files_are_swept` |
 | **Size** | A desktop file read is at most 256 KiB of UTF-8 text with `Type=Application` (an override is refused if it would be larger); `sync` looks at the first 8,192 entries of the folder | `props` |
 
 Not in the table: the sweep in `sync` reads each file of the user's folder whose
@@ -414,8 +414,16 @@ Everything from outside is drawn as **plain text** (3). The checks:
   each segment escaped (`LauncherItemIcon.qml`); `https:` and `file:` URLs from
   data fall back to a generic icon, so no icon reaches the network. An absolute
   path is also a plain file of at most 16 MiB, checked off the GUI thread
-  (3; late KRunner icons in `engine.rs`, tested by
-  `a_late_icon_that_is_not_a_plain_file_never_reaches_the_loaders`).
+  when the catalogue is built (3; late KRunner icons in `engine.rs`, tested by
+  `a_late_icon_that_is_not_a_plain_file_never_reaches_the_loaders`), **and** is
+  drawn by an asynchronous `Image` so that a swap after the check cannot block
+  the panel. *Tests:* `qml_text.rs` (`a_kirigami_icon_is_never_given_a_file`:
+  the `Kirigami.Icon` gets no file URL; every `Image` is `asynchronous: true`,
+  with a snippet that must fail), and the probe, which renames a pipe over an
+  icon file after the catalogue is built and requires the launcher to go on
+  answering and its GUI thread not to be waiting in `open()` (the 0.4.0
+  build without the asynchronous `Image` fails that check). The user's picture
+  is drawn by Telamon.Ui's `TelamonAvatar`, whose `Image` is asynchronous too.
 - The Rust core cleans every string at the boundary (`clean_display`,
   `clean_name`, `clean_query`); the properties require that nothing with a
   control, bidi or invisible character comes out, whatever goes in
@@ -500,8 +508,8 @@ Everything from outside is drawn as **plain text** (3). The checks:
 - **`unsafe`.** Rust `unsafe` is `libc` calls with `SAFETY` comments in
   `fsutil.rs` (descriptor-relative open, rename, unlink, stat, directory
   listing), `commands.rs` (`faccessat`), `overrides.rs` (`utimensat`),
-  `legacy.rs` (`renameat2`), and CXX-Qt's bridge and the two C entry points in
-  `lib.rs`. Everything that parses is safe Rust.
+  `legacy.rs` (`renameat2`), and CXX-Qt's bridge and the three C entry points in
+  `lib.rs` (`telamon_launcher_objects_new`, `telamon_launcher_icon_ok`, `telamon_launcher_migrate_user_files`). Everything that parses is safe Rust.
 - **Locked and pinned.** Builds use `--locked`; `atlas-framework` is a git
   dependency pinned by tag (`Cargo.toml`, checked by `ci/framework-ref.sh`; the
   build image is built from the same tag); every GitHub Action is pinned by
@@ -571,14 +579,23 @@ checker did not exist.
 | Dependencies and workflows | `deny.toml`, `security.yml`, `scripts/check-workflows.py` |
 
 Each fix above was checked by reverting it alone and running its test: the
-override name guard, the no-follow read and write, the `RENAME_NOREPLACE` rename,
+override name guard, the no-follow read and write, the `RENAME_NOREPLACE` flag,
 the mime-type icon name, the plain-file icon check (apps' and late), the
 adaptor surface, the desktop id check, the cleaned `Show` text, the QML text
 lint, the logging guard, the state-file checks, the marker's folder and the
-command row's cleaned subtitle each made a named test fail. The runtime ones
-(a pipe as an icon, as `state.conf`, as KRunner's state; the exported signals;
-the squatter and the log canaries) are held by the probe, which fails against
-the 0.3.4 binary.
+command row's cleaned subtitle each made a named test fail. The wiring of the
+override writer needed test hooks to be checked: with a hook that swaps a link
+or makes a file at the moment a race would, reverting the `existing` read to
+`read_capped`, the replacing write to `write_atomic`, the create-only write to
+the replacing one, or `noreplace` to `false` each fails its own test
+(`a_link_swapped_in_after_the_look_is_not_read`,
+`a_link_swapped_in_before_the_write_is_not_written_through`,
+`a_file_that_appears_before_the_write_is_not_replaced`,
+`a_file_that_appears_before_the_rename_is_kept_by_the_writers`). The runtime
+ones (a pipe as an icon, a file swapped for a pipe, a pipe as `state.conf` or
+as KRunner's state; the exported signals; the squatter and the log canaries)
+are held by the probe, which fails against the 0.3.4 binary (and, for the
+swapped icon, against a build without the asynchronous `Image`).
 
 ## 14. Considered, not an issue
 
@@ -588,8 +605,8 @@ the 0.3.4 binary.
   loop that grows with a value; refused at once (7).
 - **Entity expansion in `recently-used.xbel`**: quick-xml never expands custom
   entities; tested with a four-level bomb.
-- **Regex blow-up**: the core uses no regular expressions; the C++ uses two
-  anchored, linear patterns (Flatpak ids).
+- **Regex blow-up**: the core uses no regular expressions; the C++ uses one
+  anchored, linear pattern (`\A...\z`, Flatpak ids).
 - **Huge queries**: the query is cut at 256 characters (the backend looks at
   1,024 UTF-16 units of a paste before copying it), so the matcher's cost is
   bounded by the catalogue's caps (3).
@@ -599,7 +616,8 @@ the 0.3.4 binary.
 - **A hostile desktop file named like a real app**: it can only be *that name*;
   it can run only its own `Exec` (2, 3).
 - **Reading `/proc` or devices through an icon path**: an absolute icon path is
-  stat-ed as a regular file of at most 16 MiB before it is used (3).
+  stat-ed as a regular file of at most 16 MiB when the catalogue is built, and
+  loaded by an asynchronous `Image` (3, 8).
 - **Exec field codes in the typed command**: arguments are literal; the
   executor never expands `%` codes (they are an `ApplicationLauncherJob`
   feature of desktop files).
@@ -612,9 +630,19 @@ the 0.3.4 binary.
 ## 15. What is left
 
 - **No Explorer client yet**; the contract in 6 binds the one to come.
+- **A swap after the check, for the two state files.** `state.conf` and
+  KRunner's state file are looked at once, when they are handed to Qt and
+  KDE, which then open them on the GUI thread and again whenever they
+  synchronise. A same-user attacker who can write the user's config or state
+  folder and swaps a pipe in *after* the check (or while the launcher runs) can
+  still block the GUI thread. They are covered when they are special at start,
+  which is the case a planted file produces; a deliberate swap needs the same
+  write access that could replace the launcher's other files. The remedy would
+  be to stop using `QSettings` and `KSharedConfig` for them. Icons are not in
+  this category any more (8).
 - **Other special files in the config folders.** The two files the launcher's
   own code opens on the GUI thread through Qt (`state.conf`, KRunner's state)
-  are pre-checked (5); `launcher.conf`, `krunnerrc` and `kdeglobals` were
+  are pre-checked at start (above and 5); `launcher.conf`, `krunnerrc` and `kdeglobals` were
   measured as not hanging. A pipe planted in a place the probe does not seed
   (a file KDE's libraries read at start that we did not think of) would be
   KDE's to fix, and would stall Plasma's own processes too.
@@ -645,12 +673,12 @@ the 0.3.4 binary.
 
 | Finding | Severity | Fix |
 |---|---|---|
-| An app whose `Icon=` names a pipe stopped the launcher for good (the GUI thread waits in `open()` when the Start page draws it); the same for a late KRunner icon | medium (a denial of service of the Start menu by a process that can write a desktop file) | Icon paths must be plain files, checked off the GUI thread (3, 6) |
-| A pipe in the place of `state.conf` or of KRunner's state file stopped the launcher at start | low (needs write access to the user's config or state folder) | Both are opened only when plain and small (5) |
+| An app whose `Icon=` names a pipe stopped the launcher for good (the GUI thread waits in `open()` when the Start page draws it); the same for a late KRunner icon | medium (a denial of service of the Start menu by a process that can write a desktop file) | Icon paths must be plain files, checked off the GUI thread; and, because that check is once, absolute paths are drawn by an `asynchronous` `Image` so a pipe swapped in later stalls a loader thread, not the panel (3, 6, 8) |
+| A pipe in the place of `state.conf` or of KRunner's state file stopped the launcher at start | low (needs write access to the user's config or state folder) | Both are opened only when plain and small, checked once at start; a later swap is not covered (5, 15) |
 | The adaptors exported an internal method and two internal signals on the bus; the signals broadcast what `ImportPins` was given | low | Plain methods; the probe pins the surface (1) |
 | `Show` and `--search` text reached the field with control and bidi characters although DESIGN.md said they were stripped | low | `Backend::cleanQuery` (1) |
 | `render` trusted its caller to have cleaned the name written into a file the whole desktop reads | low (no caller passed an unclean one) | `render` refuses a name `clean_name` would change (4) |
-| The override writer followed a link that appeared between its `lstat` and its read or write, and could replace a file that appeared meanwhile | low (a race, same user) | `O_NOFOLLOW` reads, `write_atomic_nofollow`, `RENAME_NOREPLACE` (4) |
+| The override writer followed a link that appeared between its `lstat` and its read or write, and could replace a file that appeared meanwhile | low (a race, same user) | `O_NOFOLLOW` reads, `write_atomic_nofollow`, `create_atomic_nofollow` and `RENAME_NOREPLACE` (4). A review found the first version let a file made between `existing` and the write be replaced: the absent case is now create-only |
 | `KService::serviceByStorageId` loads an absolute path; the executor checked only that the id was short | low (not reachable) | `Validate::desktopId` (2) |
 | The Flatpak id check in C++ used `$`, which accepts a trailing line break | low (the core had already refused it) | `\A...\z` (2) |
 | A mime type starting with `-` or `.` made an icon name starting with it | info | The name must pass `valid_icon_name` |
@@ -658,3 +686,5 @@ the 0.3.4 binary.
 | A command's subtitle (a `PATH` entry) was shown uncleaned | info | `clean_display` |
 | The real name from AccountsService was shown uncleaned | info | `Validate::displayText` (8) |
 | CI cache saves did not name the `push` event; no advisory, licence or workflow checks existed; no hardening was checked on the result | info | `security.yml`, `deny.toml`, `check-workflows.py`, `check-hardening.sh` (11, 12) |
+| A long non-ASCII web search was refused: the core allows 1,024 query bytes (up to 3,100 characters once percent-encoded), the C++ check allowed 2,048; the same for a file URI of a long non-ASCII path | low (a search or file that did not open) | Both caps are the core's longest URLs, kept equal by `cpp_guards.rs` (2) |
+| `Validate::commandPath` accepted `:/x` (a Qt resource path) and `//host/x` through `QDir::isAbsolutePath` | info | A leading `/`, not `//`, no `..`; the `PATH` scan skips such entries (2) |

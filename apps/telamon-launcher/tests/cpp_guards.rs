@@ -15,6 +15,12 @@ fn cpp(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+fn core_src(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/telamon-launcher-core/src")
+        .join(name)
+}
+
 fn qml(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("qml")
@@ -192,6 +198,24 @@ fn the_dbus_adaptors_export_methods_and_nothing_else() {
     // these two.
     assert_eq!(count(&c, "QMetaObject::invokeMethod(m_backend"), 2);
     assert!(c.contains("\"importPins\"") && c.contains("\"clearHistory\""));
+}
+
+#[test]
+fn the_url_caps_of_cpp_cover_what_the_core_can_make() {
+    // A long non-ASCII search percent-encodes to three characters a byte: the
+    // C++ bound must be the core's longest URL, not a round number.
+    let validate = cpp("validate.h");
+    let web = fs::read_to_string(core_src("web.rs")).unwrap();
+    let recent = fs::read_to_string(core_src("recent.rs")).unwrap();
+    assert!(web.contains("pub const MAX_QUERY_BYTES: usize = 1024;"));
+    assert!(web.contains("pub const MAX_URL_CHARS: usize = 64 + 3 * MAX_QUERY_BYTES;"));
+    assert!(validate.contains("kMaxWebUrlLength = 64 + 3 * 1024;"));
+    assert!(recent.contains("pub const MAX_PATH_BYTES: usize = 4096;"));
+    assert!(validate.contains("kMaxFileUrlLength = 8 + 3 * 4096;"));
+    assert!(
+        !validate.contains("= 2048"),
+        "a round-number URL cap is back"
+    );
 }
 
 #[test]

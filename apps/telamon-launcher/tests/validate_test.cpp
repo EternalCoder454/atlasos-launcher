@@ -114,7 +114,7 @@ private Q_SLOTS:
         QTest::newRow("encoded dotdot") << QStringLiteral("file:///a/%2e%2e/etc/passwd") << false;
         QTest::newRow("dot") << QStringLiteral("file:///a/./b") << false;
         QTest::newRow("newline") << QStringLiteral("file:///a\nb") << false;
-        QTest::newRow("too long") << QStringLiteral("file:///") + QString(3000, QLatin1Char('a')) << false;
+        QTest::newRow("too long") << QStringLiteral("file:///") + QString(13000, QLatin1Char('a')) << false;
     }
     void fileUrl()
     {
@@ -126,6 +126,36 @@ private Q_SLOTS:
             QVERIFY(url.isLocalFile());
             QVERIFY(url.host().isEmpty());
         }
+    }
+
+    void longestUrls()
+    {
+        // The longest search the core builds: 1,024 bytes of CJK text (341
+        // characters of three bytes and one ASCII byte), each non-ASCII byte "%XX".
+        QString query;
+        for (int i = 0; i < 341; ++i) {
+            query += QStringLiteral("%E4%B8%AD");
+        }
+        query += QLatin1Char('A'); // 1,023 + 1 bytes: the 1,024 budget
+        const QString longest = QStringLiteral("https://www.startpage.com/do/search?q=") + query;
+        QVERIFY(longest.size() > 2048);
+        QVERIFY(longest.size() <= Validate::kMaxWebUrlLength);
+        QVERIFY(Validate::webUrl(longest).isValid());
+        // The very longest by the formula (a 38-character prefix and 3,072).
+        QString maxed = QStringLiteral("https://www.startpage.com/do/search?q=") + QString(3 * 1024, QLatin1Char('A'));
+        QVERIFY(maxed.size() <= Validate::kMaxWebUrlLength);
+        QVERIFY(Validate::webUrl(maxed).isValid());
+        // One past the bound is refused.
+        QVERIFY(!Validate::webUrl(QStringLiteral("https://x.example/?q=") + QString(Validate::kMaxWebUrlLength, QLatin1Char('A'))).isValid());
+        // A file URI of a path at the core's 4,096-byte cap, all non-ASCII.
+        QString file = QStringLiteral("file:///");
+        for (int i = 0; i < 4096 / 3; ++i) {
+            file += QStringLiteral("%E4%B8%AD");
+        }
+        QVERIFY(file.size() > 2048);
+        QVERIFY(file.size() <= Validate::kMaxFileUrlLength);
+        QVERIFY(Validate::fileUrl(file).isValid());
+        QVERIFY(!Validate::fileUrl(QStringLiteral("file:///") + QString(Validate::kMaxFileUrlLength, QLatin1Char('a'))).isValid());
     }
 
     void webUrl_data()
@@ -143,7 +173,7 @@ private Q_SLOTS:
         QTest::newRow("space") << QStringLiteral("https://example.com/a b") << false;
         QTest::newRow("newline") << QStringLiteral("https://example.com/a\nb") << false;
         QTest::newRow("empty") << QString() << false;
-        QTest::newRow("too long") << QStringLiteral("https://example.com/") + QString(3000, QLatin1Char('a')) << false;
+        QTest::newRow("too long") << QStringLiteral("https://example.com/") + QString(3200, QLatin1Char('a')) << false;
     }
     void webUrl()
     {
@@ -223,6 +253,15 @@ private Q_SLOTS:
         QTest::addColumn<bool>("ok");
         QTest::newRow("absolute") << QStringLiteral("/usr/bin/ls") << true;
         QTest::newRow("with space") << QStringLiteral("/opt/my tools/run") << true;
+        QTest::newRow("qt resource") << QStringLiteral(":/x") << false;
+        QTest::newRow("qt resource tool") << QStringLiteral(":/bin/ls") << false;
+        QTest::newRow("double slash") << QStringLiteral("//host/share/x") << false;
+        QTest::newRow("triple slash") << QStringLiteral("///usr/bin/ls") << false;
+        QTest::newRow("dotdot") << QStringLiteral("/usr/bin/../../bin/sh") << false;
+        QTest::newRow("trailing dotdot") << QStringLiteral("/usr/bin/..") << false;
+        QTest::newRow("a name with two dots") << QStringLiteral("/usr/bin/a..b") << true;
+        QTest::newRow("a dot segment") << QStringLiteral("/usr/./bin/ls") << true;
+        QTest::newRow("single dot dir") << QStringLiteral("/opt/x.y/ls") << true;
         QTest::newRow("bare name") << QStringLiteral("ls") << false;
         QTest::newRow("relative") << QStringLiteral("./ls") << false;
         QTest::newRow("home") << QStringLiteral("~/bin/ls") << false;

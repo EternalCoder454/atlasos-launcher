@@ -129,7 +129,7 @@ fn is_temp_tail(s: &[u8]) -> bool {
 /// swapping a path component for a symlink mid-way can't redirect them.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let target = resolve_link(path)?;
-    write_in_dir(&target, bytes, mode, false)
+    write_in_dir(&target, bytes, mode, false, false)
 }
 
 /// [`write_atomic`] for a name in a folder other programs may write to (the
@@ -141,10 +141,24 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 /// looked is not clobbered (`AlreadyExists`). Links in the folders above
 /// `path` are followed, as a dotfiles manager may use them.
 pub fn write_atomic_nofollow(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    write_in_dir(path, bytes, mode, true)
+    write_in_dir(path, bytes, mode, true, false)
 }
 
-fn write_in_dir(target: &Path, bytes: &[u8], mode: u32, strict: bool) -> io::Result<()> {
+/// [`write_atomic_nofollow`] for a name the caller found **absent**: it makes
+/// the file only if the name is still free at the rename (`AlreadyExists`
+/// otherwise, whatever has appeared there: a file, a link, a pipe), so the
+/// caller's look and the write cannot disagree about what is replaced.
+pub fn create_atomic_nofollow(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    write_in_dir(path, bytes, mode, true, true)
+}
+
+fn write_in_dir(
+    target: &Path,
+    bytes: &[u8],
+    mode: u32,
+    strict: bool,
+    create_only: bool,
+) -> io::Result<()> {
     let name = target
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
@@ -185,7 +199,13 @@ fn write_in_dir(target: &Path, bytes: &[u8], mode: u32, strict: bool) -> io::Res
             "not a regular file",
         ));
     }
-    let noreplace = strict && !seen;
+    if create_only && seen {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the name is taken",
+        ));
+    }
+    let noreplace = strict && (!seen || create_only);
     let mode = if existing {
         // Never setuid, setgid or sticky, whatever the old file had.
         (st.st_mode & 0o777) as u32
@@ -295,6 +315,25 @@ pub fn sweep_stale_temps(dir: &Path, name: &str, older_than: Duration) -> usize 
     removed
 }
 
+/// A test hook just before the rename of [`write_via_temp`]: where a file
+/// appearing at the name would be clobbered without `RENAME_NOREPLACE`.
+#[cfg(test)]
+pub(crate) mod hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        pub static BEFORE_RENAME: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    pub fn before_rename() {
+        BEFORE_RENAME.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f();
+            }
+        });
+    }
+}
+
 /// Renames `from` to `to` in the folder `dfd`; with `noreplace` the name `to`
 /// must not exist (`RENAME_NOREPLACE`; a file system that cannot do that
 /// falls back to a plain rename).
@@ -359,6 +398,8 @@ fn write_via_temp(
         }
         file.write_all(bytes)?;
         file.sync_all()?;
+        #[cfg(test)]
+        hooks::before_rename();
         rename_in(dfd, tmp, final_name, noreplace)
     })();
     drop(file);
@@ -733,5 +774,60 @@ mod tests {
         // Without the flag the rename replaces, as write_atomic always did.
         rename_in(dfd, &tmp, &fin, false).unwrap();
         assert_eq!(fs::read(d.path().join("final")).unwrap(), b"ours");
+    }
+
+    #[test]
+    fn create_only_never_replaces_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f.desktop");
+        create_atomic_nofollow(&p, b"first", 0o644).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"first");
+        let e = create_atomic_nofollow(&p, b"second", 0o644).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&p).unwrap(), b"first");
+        // A link, even a dangling one, is a taken name.
+        let l = d.path().join("l.desktop");
+        symlink(d.path().join("nowhere"), &l).unwrap();
+        assert!(create_atomic_nofollow(&l, b"x", 0o644).is_err());
+        assert!(!d.path().join("nowhere").exists());
+        let left = fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_file_that_appears_before_the_rename_is_kept_by_the_writers() {
+        // The writer looked and saw the name free; its temp file is written;
+        // then something takes the name. The create-only writer and the
+        // replacing writer on an absent name must both keep theirs.
+        for create_only in [true, false] {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("f.desktop");
+            let q = p.clone();
+            hooks::BEFORE_RENAME.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || fs::write(&q, b"theirs").unwrap()));
+            });
+            let r = if create_only {
+                create_atomic_nofollow(&p, b"ours", 0o644)
+            } else {
+                write_atomic_nofollow(&p, b"ours", 0o644)
+            };
+            hooks::BEFORE_RENAME.with(|h| *h.borrow_mut() = None);
+            assert_eq!(
+                r.unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists,
+                "{create_only}"
+            );
+            assert_eq!(fs::read(&p).unwrap(), b"theirs", "{create_only}");
+            let left = fs::read_dir(d.path())
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                .count();
+            assert_eq!(left, 0, "the temp file is removed");
+        }
     }
 }

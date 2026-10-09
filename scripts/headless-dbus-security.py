@@ -172,7 +172,11 @@ def seed_user_data():
     os.symlink("/dev/zero", os.path.join(icons, "zero.svg"))
     with open(os.path.join(icons, "big.svg"), "wb") as f:
         f.truncate(900 * 1024 * 1024)
-    for n, icon in enumerate(["pipe.png", "zero.svg", "big.svg"], 1):
+    # An icon that is a plain file now and is swapped for a pipe once the
+    # launcher has built its catalogue (the check is then already past).
+    with open(os.path.join(icons, "swap.svg"), "w") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="red"/></svg>')
+    for n, icon in enumerate(["pipe.png", "zero.svg", "big.svg", "swap.svg"], 1):
         with open(os.path.join(data, "applications", f"icontest{n}.desktop"), "w") as f:
             f.write(
                 f"[Desktop Entry]\nType=Application\nName=Icon test {n}\nExec=true\n"
@@ -315,6 +319,12 @@ def main():
                 member_keyword="member",
             )
         )
+    # The catalogue is built by now and swap.svg passed its check as a plain
+    # file: swap a pipe over it, as a hostile app could.
+    icons = os.path.join(os.environ["HOME"], "icons")
+    os.mkfifo(os.path.join(icons, "swap.fifo"))
+    pump(3.0)
+    os.rename(os.path.join(icons, "swap.fifo"), os.path.join(icons, "swap.svg"))
     # The engine starts within a second of the name (logind and the seat answer,
     # or a timer): ImportPins and ClearHistory before that have nothing to reach.
     pump(3.0)
@@ -378,7 +388,7 @@ def main():
     # answering (the vetted icon is a generic one instead).
     try:
         bus.call_blocking(NAME, PATH, "org.freedesktop.DBus.Properties", "Get", "ss", (IFACE, "Visible"), timeout=8)
-        check(True, "the launcher answers with a pipe, a device link and a huge file as app icons on the Start page")
+        check(True, "the launcher answers with a pipe, a device link, a huge file and a file swapped for a pipe as app icons on the Start page")
     except dbus.exceptions.DBusException as e:
         check(False, f"the launcher stopped answering with a pipe as an app icon ({e.get_dbus_name()})")
     threads_in_open = []
@@ -390,7 +400,9 @@ def main():
             continue
         if "wait_for_partner" in w or "fifo_open" in w:
             threads_in_open.append(t)
-    check(not threads_in_open, f"no thread of the launcher waits in open() on a pipe (threads: {threads_in_open})")
+    # The image loader thread may wait on a pipe swapped in late (that is what
+    # the asynchronous Image is for); the GUI thread, the process's first, never.
+    check(str(pid) not in threads_in_open, f"the GUI thread does not wait in open() on a pipe (threads waiting: {threads_in_open})")
     accepted(lambda: launcher.Hide(), "Hide after the canary queries")
     huge = dbus.Array([dbus.Int32(i) for i in range(2_000_000)], signature="i")
     accepted(

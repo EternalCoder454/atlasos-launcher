@@ -16,7 +16,14 @@
 namespace Validate
 {
 inline constexpr int kMaxIdLength = 255;
-inline constexpr int kMaxUrlLength = 2048;
+// The longest URLs the Rust core can produce, in UTF-16 units (a QString's
+// size(); the URLs are ASCII): a web search is a prefix of at most 64 characters
+// and up to web::MAX_QUERY_BYTES (1,024) query bytes, each percent-encoded as
+// three characters (CJK text is three bytes a character); a file URI is a path
+// of at most recent::MAX_PATH_BYTES (4,096) bytes, encoded the same way, with
+// "file://". tests/cpp_guards.rs keeps these in step with the Rust constants.
+inline constexpr int kMaxWebUrlLength = 64 + 3 * 1024;
+inline constexpr int kMaxFileUrlLength = 8 + 3 * 4096;
 
 // A desktop file id: [A-Za-z0-9._-]{1,255} ending in ".desktop". Nothing else
 // is handed to KService::serviceByStorageId: it takes an absolute path for a
@@ -87,7 +94,7 @@ inline bool flatpakId(const QString &id)
 // clean file:/// URL.
 inline QUrl fileUrl(const QString &uri)
 {
-    if (uri.isEmpty() || uri.size() > kMaxUrlLength) {
+    if (uri.isEmpty() || uri.size() > kMaxFileUrlLength) {
         return {};
     }
     const QUrl url(uri, QUrl::StrictMode);
@@ -113,7 +120,7 @@ inline QUrl fileUrl(const QString &uri)
 // An invalid QUrl when it fails.
 inline QUrl webUrl(const QString &text)
 {
-    if (text.isEmpty() || text.size() > kMaxUrlLength) {
+    if (text.isEmpty() || text.size() > kMaxWebUrlLength) {
         return {};
     }
     const QUrl url(text, QUrl::StrictMode);
@@ -192,8 +199,23 @@ inline bool plainSmallFile(const QString &path, qint64 maxBytes)
 
 // The program of a typed command: the absolute path the PATH scan found.
 // Never a bare name (that would be looked up on a PATH again, at launch).
+//
+// "Absolute" is a leading '/': Qt's QDir::isAbsolutePath also accepts ":/x" (a
+// resource path) and, on other systems, drive letters and UNC names. No ".."
+// segment (the PATH scan in the core skips such entries too) and not a leading
+// "//" (two slashes are a network path elsewhere, never a PATH entry here).
 inline bool commandPath(const QString &executable, int maxLength)
 {
-    return !executable.isEmpty() && executable.size() <= maxLength && !executable.contains(QChar(0)) && QDir::isAbsolutePath(executable);
+    if (executable.isEmpty() || executable.size() > maxLength || executable.contains(QChar(0)) || !executable.startsWith(QLatin1Char('/'))
+        || executable.startsWith(QLatin1String("//"))) {
+        return false;
+    }
+    const QStringList segments = executable.split(QLatin1Char('/'));
+    for (const QString &segment : segments) {
+        if (segment == QLatin1String("..")) {
+            return false;
+        }
+    }
+    return true;
 }
 }

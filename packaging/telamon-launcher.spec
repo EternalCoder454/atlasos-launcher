@@ -155,13 +155,14 @@ annocheck %{buildroot}%{_bindir}/telamon-launcher
   field shows what is searched for (control, bidi and invisible characters out, at most 256 characters).
 - Starting things: the desktop file id of an app to start must be a plain id (KService takes an absolute path
   as an id and would load any desktop file there), a typed command runs only by the absolute path the PATH scan
-  found, web addresses allow no user or port, file addresses no "." or ".." segment, and the Flatpak id check no
+  found (a leading "/", no ".."), web addresses allow no user or port and long non-ASCII searches are no longer refused, file addresses no "." or ".." segment, and the Flatpak id check no
   longer lets a trailing line break through.
 - Fix: a pipe could hang the launcher for good. An app whose Icon= names a pipe stopped the launcher when
   the Start page drew it; a pipe in the place of ~/.config/telamon-launcher/state.conf, or of KRunner's state
   file (~/.local/state/telamon-launcherstaterc), stopped it at start. Icon paths must now be plain files (not a
   pipe, a device, an empty or huge file, or /proc and /sys), and those two files are opened only if they are
-  plain small files.
+  plain small files. File icons are drawn by an asynchronous image, so a file swapped for a pipe after the check
+  cannot block the panel either.
 - Smaller: a mime type starting with "-" or "." no longer makes an icon name starting with it, the folder shown
   under a command and the account's real name are cleaned like other shown text.
 - Tests: property tests (cargo test -- props) for the cleaners, the desktop-entry catalogue, the rename writer,

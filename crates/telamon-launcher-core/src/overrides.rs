@@ -38,7 +38,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::catalog::valid_desktop_id;
-use crate::fsutil::{read_capped, read_capped_nofollow, write_atomic_nofollow};
+use crate::fsutil::{
+    create_atomic_nofollow, read_capped, read_capped_nofollow, write_atomic_nofollow,
+};
 use crate::legacy::desktop_id_alias;
 use crate::names::{Names, clean_name};
 
@@ -252,6 +254,38 @@ fn find_original(dirs: &AppDirs, id: &str) -> Option<(PathBuf, String, i64)> {
     None
 }
 
+/// Test hooks between the steps of [`apply`], to put something in the way at
+/// the moment a race would: after `existing` has looked at the path, and just
+/// before the file is written.
+#[cfg(test)]
+mod hooks {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Hook = Box<dyn Fn(&Path)>;
+
+    thread_local! {
+        pub static AFTER_LOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        pub static BEFORE_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub fn after_look(path: &Path) {
+        AFTER_LOOK.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(path);
+            }
+        });
+    }
+
+    pub fn before_write(path: &Path) {
+        BEFORE_WRITE.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(path);
+            }
+        });
+    }
+}
+
 enum Existing {
     Absent,
     Ours(Vec<u8>),
@@ -269,11 +303,15 @@ fn existing(dirs: &AppDirs, id: &str) -> Existing {
         Ok(m) if !m.file_type().is_file() || m.len() > MAX_DESKTOP_BYTES => Existing::Other,
         // Opened without following a link: one swapped in since the lstat is
         // an error here, not a file to read.
-        Ok(_) => match read_capped_nofollow(&path, MAX_DESKTOP_BYTES) {
-            Ok(Some(bytes)) if is_ours(&bytes) => Existing::Ours(bytes),
-            Ok(None) => Existing::Absent,
-            _ => Existing::Other,
-        },
+        Ok(_) => {
+            #[cfg(test)]
+            hooks::after_look(&path);
+            match read_capped_nofollow(&path, MAX_DESKTOP_BYTES) {
+                Ok(Some(bytes)) if is_ours(&bytes) => Existing::Ours(bytes),
+                Ok(None) => Existing::Absent,
+                _ => Existing::Other,
+            }
+        }
     }
 }
 
@@ -309,17 +347,26 @@ pub fn apply(dirs: &AppDirs, ids: &[&str], name: &str) -> Outcome {
         else {
             return Outcome::NoOriginal;
         };
-        let outcome = match existing(dirs, id) {
+        let state = existing(dirs, id);
+        let outcome = match state {
             Existing::Other => return Outcome::NotOurs,
-            Existing::Ours(have) if have == wanted.as_bytes() => Outcome::Unchanged,
+            Existing::Ours(ref have) if have == wanted.as_bytes() => Outcome::Unchanged,
             _ => {
                 let path = dirs.user.join(id);
                 let made = fs::DirBuilder::new()
                     .recursive(true)
                     .mode(0o755)
                     .create(&dirs.user);
-                if made.is_err() || write_atomic_nofollow(&path, wanted.as_bytes(), 0o644).is_err()
-                {
+                #[cfg(test)]
+                hooks::before_write(&path);
+                // A name that was absent when looked at is made only if it is
+                // still free; a file of ours is replaced.
+                let written = if matches!(state, Existing::Absent) {
+                    create_atomic_nofollow(&path, wanted.as_bytes(), 0o644)
+                } else {
+                    write_atomic_nofollow(&path, wanted.as_bytes(), 0o644)
+                };
+                if made.is_err() || written.is_err() {
                     return Outcome::Failed;
                 }
                 // The app's age is the system file's, not this write's
@@ -826,5 +873,92 @@ mod tests {
         assert!(!is_ours(group.as_bytes()));
         assert!(!is_ours(&[0xff, 0xfe]));
         assert!(!is_ours(b""));
+    }
+
+    /// Runs `body` with `hook` installed in `slot`, removing it afterwards.
+    type HookSlot = &'static std::thread::LocalKey<std::cell::RefCell<Option<Box<dyn Fn(&Path)>>>>;
+
+    fn with_hook(slot: HookSlot, hook: impl Fn(&Path) + 'static, body: impl FnOnce()) {
+        slot.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+        body();
+        slot.with(|h| *h.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_link_swapped_in_after_the_look_is_not_read() {
+        // The file is ours when `existing` looks (lstat: a regular file); then
+        // a link to another file of ours-looking content takes its place. The
+        // read must refuse the link (O_NOFOLLOW): NotOurs, nothing written.
+        let f = fx();
+        let id = "org.example.files.desktop";
+        assert_eq!(apply(&f.dirs, &[id], "Mine"), Outcome::Written);
+        let other = f.dirs.user.join("other.txt");
+        fs::write(&other, render(ORIGINAL, "Someone else").unwrap()).unwrap();
+        let (path, target) = (f.dirs.user.join(id), other.clone());
+        with_hook(
+            &hooks::AFTER_LOOK,
+            move |p| {
+                if p == path {
+                    fs::remove_file(p).unwrap();
+                    symlink(&target, p).unwrap();
+                }
+            },
+            || assert_eq!(apply(&f.dirs, &[id], "New name"), Outcome::NotOurs),
+        );
+        assert!(read_link_is_symlink(&f.dirs.user.join(id)));
+        assert!(
+            fs::read_to_string(&other)
+                .unwrap()
+                .contains("Name=Someone else")
+        );
+    }
+
+    fn read_link_is_symlink(p: &Path) -> bool {
+        fs::symlink_metadata(p).unwrap().file_type().is_symlink()
+    }
+
+    #[test]
+    fn a_link_swapped_in_before_the_write_is_not_written_through() {
+        let f = fx();
+        let id = "org.example.files.desktop";
+        assert_eq!(apply(&f.dirs, &[id], "Mine"), Outcome::Written);
+        let precious = f.dirs.user.join("precious.txt");
+        fs::write(&precious, "do not touch").unwrap();
+        let (path, target) = (f.dirs.user.join(id), precious.clone());
+        with_hook(
+            &hooks::BEFORE_WRITE,
+            move |p| {
+                if p == path {
+                    fs::remove_file(p).unwrap();
+                    symlink(&target, p).unwrap();
+                }
+            },
+            || assert_eq!(apply(&f.dirs, &[id], "New name"), Outcome::Failed),
+        );
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "do not touch");
+        assert!(
+            read_link_is_symlink(&f.dirs.user.join(id)),
+            "the link is still there"
+        );
+    }
+
+    #[test]
+    fn a_file_that_appears_before_the_write_is_not_replaced() {
+        // No override yet: `existing` says Absent; before the write the user's
+        // own file appears at the name. RENAME_NOREPLACE keeps it.
+        let f = fx();
+        let id = "org.example.files.desktop";
+        let path = f.dirs.user.join(id);
+        let mine = "[Desktop Entry]\nType=Application\nName=Made meanwhile\nExec=x\n";
+        with_hook(
+            &hooks::BEFORE_WRITE,
+            move |p| {
+                if p == path {
+                    fs::write(p, mine).unwrap();
+                }
+            },
+            || assert_eq!(apply(&f.dirs, &[id], "N"), Outcome::Failed),
+        );
+        assert_eq!(read(&f, id), mine);
     }
 }
